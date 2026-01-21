@@ -1161,12 +1161,16 @@ def run():
                         elif bid > 0.10 and fair_val < (bid - 0.10): 
                             action = f"🔴 SELL"; diff = bid - fair_val; reason = f"Sobreprecio +{diff:.2f}"
 
-                    # B. LOTTO
+                    # B. LOTTO (CORREGIDO)
+                    # Solo buscamos "pelotazos" si el mercado está muy activo (Pace alto)
+                    # y vemos un bucket muy alto barato.
                     if action == "-" and is_long_term and pace_status != "🔰 WARMUP":
                         dist_from_mean = pred_mean - b['max'] 
-                        if dist_from_mean > 120 and pace_24h < 2.0 and ask <= 0.005 and ask > 0:
-                                action = "🎣 FISH"; reason = "Lotto (Slowdown)"; special_tag = "BUY"
-                        elif dist_from_mean < -120 and pace_24h > 3.2 and ask <= 0.005 and ask > 0:
+                        
+                        # ELIMINADO EL BLOQUE "SLOWDOWN" QUE COMPRABA BUCKETS BAJOS
+                        # Nos quedamos solo con la apuesta "Active" (Breakout alcista)
+                        
+                        if dist_from_mean < -120 and pace_24h > 3.2 and ask <= 0.005 and ask > 0:
                                 action = "🎣 FISH"; reason = "Lotto (Active)"; special_tag = "BUY"
 
                     # C. SNIPER
