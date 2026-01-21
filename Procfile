@@ -1,0 +1,1 @@
+worker: python3 elon_auto_bot_threads.py
