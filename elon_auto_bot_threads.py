@@ -819,6 +819,7 @@ class MarketPanicSensor:
                             'type': 'PUMP',
                             'market_title': m['title'],
                             'bucket': b['bucket'],
+                            'min': b.get('min', 0),
                             'price': ask,
                             'change': (ask/avg_ask) - 1.0
                         })
@@ -831,6 +832,7 @@ class MarketPanicSensor:
                             'type': 'DUMP',
                             'market_title': m['title'],
                             'bucket': b['bucket'],
+                            'min': b.get('min', 0), 
                             'price': bid,
                             'change': (bid/avg_bid) - 1.0
                         })
@@ -1120,6 +1122,7 @@ def run():
                 is_long_term = (m_poly['hours'] > 72.0)
 
                 for b in relevant_prices['buckets']:
+                    if 'min' not in b: continue 
                     if b['max'] < m_poly['count']: continue
                     if b['max'] < min_feasible_total: continue 
 
