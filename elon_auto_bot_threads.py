@@ -840,12 +840,6 @@ class MarketPanicSensor:
         return alerts
 
 # ==========================================
-# 6. DIRECTOR DE ORQUESTA V9.2 (GAUSSIAN ANNICA FULL)
-# ==========================================
-# ==========================================
-# 6. DIRECTOR DE ORQUESTA V9.3 (NUCLEAR SAFETY)
-# ==========================================
-# ==========================================
 # 6. DIRECTOR DE ORQUESTA V9.3 (NUCLEAR SAFETY FINAL)
 # ==========================================
 def run():
@@ -1141,10 +1135,19 @@ def run():
                     prob_min = norm.cdf(b['min'], loc=pred_mean, scale=pred_std)
                     prob_max = norm.cdf(b['max'] + 1, loc=pred_mean, scale=pred_std)
                     fair_val = prob_max - prob_min
+                    
                     if "+" in b['bucket']: fair_val = 1.0 - prob_min
                     
                     ask = b.get('ask', 0); bid = b.get('bid', 0)
+
+                    # 🛑 FIX ANTI-ESPEJISMOS (GHOST PRICES)
+                    # Si el precio es menor a 0.2 céntimos, es un error de liquidez o falta de datos.
+                    # Saltamos para evitar comprar "infinito" a precio 0.00.
+                    if ask < 0.001: 
+                        continue 
+
                     action = "-"; reason = "_"; special_tag = ""
+
                     spread = ask - bid
                     spread_pct = (spread / ask) if ask > 0 else 1.0
                     
