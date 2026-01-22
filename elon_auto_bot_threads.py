@@ -774,7 +774,7 @@ class PaperTrader:
             if last_label and row['label'] != last_label:
                 print("   " + "-"*85)
             
-            print(f"   🔹 {row['label']:<20} | {row['bucket_str']:<10} | ${row['entry']:<11.2f} | ${row['current']:<11.2f} | {row['pnl']:+6.2f}")
+            print(f"   🔹 {row['label']:<20} | {row['bucket_str']:<10} | ${row['entry']:<11.3f} | ${row['current']:<11.3f} | {row['pnl']:+6.2f}")
             last_label = row['label']
 
         total_equity = cash + invested_value
