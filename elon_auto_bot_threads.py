@@ -1097,7 +1097,15 @@ def run():
                     
                     pred_mean = np.mean(final_sims)
                     pred_std = np.std(final_sims)
+                    
                     if pred_std < 0.01: pred_std = 0.01
+
+                    # 🛑 NUEVO: DAMPENING (AMORTIGUADOR DE LOCURA)
+                    MAX_ALLOWED_STD = 120.0
+                    effective_std = min(pred_std, MAX_ALLOWED_STD)
+
+                # Unificar variable para el resto del código
+                if 'effective_std' not in locals(): effective_std = pred_std
 
                 # VISUALIZACIÓN
                 dias = int(m_poly['hours'] // 24)
@@ -1132,8 +1140,15 @@ def run():
                     # ============================================
 
                     # CÁLCULO DE PROBABILIDAD (Solo si NO es warmup)
-                    prob_min = norm.cdf(b['min'], loc=pred_mean, scale=pred_std)
-                    prob_max = norm.cdf(b['max'] + 1, loc=pred_mean, scale=pred_std)
+
+                    # Cálculo original
+                    # prob_min = norm.cdf(b['min'], loc=pred_mean, scale=pred_std)
+                    # prob_max = norm.cdf(b['max'] + 1, loc=pred_mean, scale=pred_std)
+
+                    # Cálculo para evitar locura de curva plana
+                    prob_min = norm.cdf(b['min'], loc=pred_mean, scale=effective_std)
+                    prob_max = norm.cdf(b['max'] + 1, loc=pred_mean, scale=effective_std)
+
                     fair_val = prob_max - prob_min
                     
                     if "+" in b['bucket']: fair_val = 1.0 - prob_min
