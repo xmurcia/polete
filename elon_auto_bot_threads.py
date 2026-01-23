@@ -846,7 +846,7 @@ class MarketPanicSensor:
 # 6. DIRECTOR DE ORQUESTA V9.3 (NUCLEAR SAFETY FINAL)
 # ==========================================
 def run():
-    print("\n🤖 ELON-BOT: V9.3 (HAWKES + GAUSSIAN + SAFETY LOCK)")
+    print("\n🤖 ELON-BOT: V10.1 (HAWKES + HYBRID BRAIN + SMART EXIT)")
     print("======================================================")
     
     # --- SISTEMA DE LOGGING AUTOMÁTICO ---
@@ -924,7 +924,7 @@ def run():
                 global_events = [e for e in d if (time.time()*1000 - e['timestamp']) < 86400000]
         except: pass
 
-    log_monitor("🚀 INICIO V9.3 (NUCLEAR SAFETY)", force_print=True)
+    log_monitor("🚀 INICIO V10.1 (HYBRID + SMART EXIT)", force_print=True)
 
     while True:
         try:
@@ -1155,36 +1155,97 @@ def run():
 
                 print("-" * 75)
                 print(f"\n>>> {m_poly['title']}{blind_tag}")
-                print(f"    📊 Act: {m_poly['count']} Avg: {m_poly['daily_avg']:.0f} | 🧠 Gauss: μ={pred_mean:.1f} σ={pred_std:.1f} | ⏳ Quedan: {time_str}")
+                print(f"    📊 Act: {m_poly['count']} Avg: {m_poly['daily_avg']:.0f} | 🧠 Gauss: μ={pred_mean:.1f} σ={effective_std:.1f} | ⏳ Quedan: {time_str}")
                 print("-" * 75)
                 print(f"{'BUCKET':<10} | {'BID':<8} | {'ASK':<8} | {'FAIR':<8} | {'ACCIÓN':<10} | {'MOTIVO'}")
                 
                 min_feasible_total = m_poly['count'] + (m_poly['hours'] * 0.9)
                 is_long_term = (m_poly['hours'] > 72.0)
+                
+                # --- PRE-SCAN PARA GESTIÓN DE INVENTARIO (SMART EXIT) ---
+                # Buscamos si tenemos posiciones abiertas en este mercado
+                my_positions = [
+                    (k.split(" | ")[1], v) for k, v in trader.portfolio.items() 
+                    if titles_match(m_poly['title'], k.split(" | ")[0])
+                ]
 
+                # BUCLE PRINCIPAL DE BUCKETS
                 for b in relevant_prices['buckets']:
                     if 'min' not in b: continue 
+                    
+                    # Filtros de visualización para limpiar la pantalla
                     if b['max'] < m_poly['count']: continue
                     if b['max'] < min_feasible_total: continue 
+                    
+                    current_bid = b.get('bid', 0)
+                    current_ask = b.get('ask', 0)
+                    t_slug = b['bucket']
 
                     # ============================================
                     # ⛔ ZONA DE SEGURIDAD: CANDADO NUCLEAR
                     # ============================================
                     if IS_WARMUP:
-                        # Si estamos en warmup, imprimimos y SALTAMOS (continue)
-                        # No calculamos probabilidades ni lógica de compra.
-                        ask = b.get('ask', 0); bid = b.get('bid', 0)
-                        print(f"{b['bucket']:<10} | {bid:.3f}    | {ask:.3f}    | {'-':<8} | {'-':<10} | 🔒 WARMUP")
+                        print(f"{b['bucket']:<10} | {current_bid:.3f}    | {current_ask:.3f}    | {'-':<8} | {'-':<10} | 🔒 WARMUP")
                         continue
                     # ============================================
 
+                    # ============================================
+                    # 🧹 SMART EXIT: GARBAGE COLLECTOR (TIME SENSITIVE)
+                    # ============================================
+                    my_pos_data = next((p[1] for p in my_positions if p[0] == t_slug), None)
+                    
+                    if my_pos_data:
+                        bucket_mid = (b['min'] + b['max']) / 2
+                        dist_to_pred = abs(bucket_mid - pred_mean)
+                        safe_std = max(effective_std, 10.0) 
+                        z_score = dist_to_pred / safe_std
+                        
+                        # UMBRAL DINÁMICO
+                        if hours_to_predict > 48.0: sigma_limit = 4.0
+                        elif hours_to_predict > 24.0: sigma_limit = 3.0
+                        else: sigma_limit = 2.0
+                        
+                        IS_INVALID_THESIS = z_score > sigma_limit
+                        my_avg_price = my_pos_data['avg_price']
+                        
+                        if IS_INVALID_THESIS and current_bid > 0.001:
+                            
+                            # A) LOTTO FLIP (Take Profit)
+                            is_profit_flip = False
+                            if current_bid > my_avg_price:
+                                profit_pct = 0
+                                if my_avg_price > 0: profit_pct = ((current_bid - my_avg_price) / my_avg_price) * 100
+                                if profit_pct > 10.0: is_profit_flip = True
+
+                            # B) SALVAGE (Recta Final)
+                            is_salvage = False
+                            if not is_profit_flip and hours_to_predict < 24.0:
+                                recoverable_ratio = 0
+                                if my_avg_price > 0: recoverable_ratio = current_bid / my_avg_price
+                                if recoverable_ratio > 0.20: is_salvage = True
+
+                            # EJECUCIÓN
+                            if is_profit_flip or is_salvage:
+                                action_tag = "💰 EXIT" if is_profit_flip else "💀 EXIT"
+                                reason_tag = f"Take Profit ({z_score:.1f}σ)" if is_profit_flip else f"Salvage ({z_score:.1f}σ)"
+                                
+                                # 1. Ejecutar Venta (Actualiza Portfolio y CSV)
+                                trade_res = trader.execute(m_poly['title'], t_slug, action_tag, current_bid, reason=reason_tag)
+                                
+                                # 2. Guardar Snapshot (FOTO AUDITORÍA)
+                                if trade_res:
+                                    print(f"{t_slug:<10} | {current_bid:.3f}    | {current_ask:.3f}    | {'-':<8} | {action_tag:<10} | {reason_tag}")
+                                    context = {
+                                        "predicted_mean": pred_mean, "predicted_std": effective_std,
+                                        "z_score": z_score, "hours_left": hours_to_predict,
+                                        "my_avg_price": my_avg_price, "current_bid": current_bid
+                                    }
+                                    save_trade_snapshot(action_tag, m_poly['title'], t_slug, current_bid, reason_tag, context)
+                                
+                                continue # Saltamos al siguiente bucket
+                    # ============================================
+
                     # CÁLCULO DE PROBABILIDAD (Solo si NO es warmup)
-
-                    # Cálculo original
-                    # prob_min = norm.cdf(b['min'], loc=pred_mean, scale=pred_std)
-                    # prob_max = norm.cdf(b['max'] + 1, loc=pred_mean, scale=pred_std)
-
-                    # Cálculo para evitar locura de curva plana
                     prob_min = norm.cdf(b['min'], loc=pred_mean, scale=effective_std)
                     prob_max = norm.cdf(b['max'] + 1, loc=pred_mean, scale=effective_std)
 
@@ -1192,18 +1253,14 @@ def run():
                     
                     if "+" in b['bucket']: fair_val = 1.0 - prob_min
                     
-                    ask = b.get('ask', 0); bid = b.get('bid', 0)
-
-                    # 🛑 FIX ANTI-ESPEJISMOS (GHOST PRICES)
-                    # Si el precio es menor a 0.2 céntimos, es un error de liquidez o falta de datos.
-                    # Saltamos para evitar comprar "infinito" a precio 0.00.
-                    if ask < 0.001: 
+                    # 🛑 FIX ANTI-ESPEJISMOS
+                    if current_ask < 0.001: 
                         continue 
 
                     action = "-"; reason = "_"; special_tag = ""
 
-                    spread = ask - bid
-                    spread_pct = (spread / ask) if ask > 0 else 1.0
+                    spread = current_ask - current_bid
+                    spread_pct = (spread / current_ask) if current_ask > 0 else 1.0
                     
                     # --- LÓGICA DE TRADING ---
                     
@@ -1211,42 +1268,36 @@ def run():
                     
                     # A. VALUE
                     if action == "-":
-                        is_cheap = (ask < 0.05)
+                        is_cheap = (current_ask < 0.05)
                         ok_spread = (not bad_spread) or is_cheap
-                        if ask > 0 and fair_val > (ask + 0.10) and ok_spread: 
-                            action = f"🟢 BUY"; diff = fair_val - ask; reason = f"Value +{diff:.2f}"
-                        elif bid > 0.10 and fair_val < (bid - 0.10): 
-                            action = f"🔴 SELL"; diff = bid - fair_val; reason = f"Sobreprecio +{diff:.2f}"
+                        if current_ask > 0 and fair_val > (current_ask + 0.10) and ok_spread: 
+                            action = f"🟢 BUY"; diff = fair_val - current_ask; reason = f"Value +{diff:.2f}"
+                        elif current_bid > 0.10 and fair_val < (current_bid - 0.10): 
+                            action = f"🔴 SELL"; diff = current_bid - fair_val; reason = f"Sobreprecio +{diff:.2f}"
 
                     # B. LOTTO (CORREGIDO)
-                    # Solo buscamos "pelotazos" si el mercado está muy activo (Pace alto)
-                    # y vemos un bucket muy alto barato.
                     if action == "-" and is_long_term and pace_status != "🔰 WARMUP":
                         dist_from_mean = pred_mean - b['max'] 
-                        
-                        # ELIMINADO EL BLOQUE "SLOWDOWN" QUE COMPRABA BUCKETS BAJOS
-                        # Nos quedamos solo con la apuesta "Active" (Breakout alcista)
-                        
-                        if dist_from_mean < -120 and pace_24h > 3.2 and ask <= 0.005 and ask > 0:
+                        if dist_from_mean < -120 and pace_24h > 3.2 and current_ask <= 0.005 and current_ask > 0:
                                 action = "🎣 FISH"; reason = "Lotto (Active)"; special_tag = "BUY"
 
                     # C. SNIPER
                     if action == "-" and m_poly['hours'] < 1.0:
-                        if 0.75 < ask < 0.95 and b['min'] <= pred_mean <= b['max']:
+                        if 0.75 < current_ask < 0.95 and b['min'] <= pred_mean <= b['max']:
                              action = "🔫 SNIPER"; reason = "Breakout >0.75 Last Hour"; special_tag = "BUY"
 
                     # ZOMBIE
-                    if m_poly['hours'] < 6.0 and fair_val < 0.01 and bid > 0.02 and action == "-":
+                    if m_poly['hours'] < 6.0 and fair_val < 0.01 and current_bid > 0.02 and action == "-":
                          action = "💀 DUMP"; reason = "Exit"
                     
                     # EXECUTE
-                    if ask > 0.01 or fair_val > 0.01 or special_tag:
-                        print(f"{b['bucket']:<10} | {bid:.3f}    | {ask:.3f}    | {fair_val:.3f}    | {action:<10} | {reason}")
+                    if current_ask > 0.01 or fair_val > 0.01 or special_tag or "EXIT" in action:
+                        print(f"{b['bucket']:<10} | {current_bid:.3f}    | {current_ask:.3f}    | {fair_val:.3f}    | {action:<10} | {reason}")
 
                     if action != "-": 
                         raw_act = action.split()[1] if " " in action else action
                         trade_act = special_tag if special_tag else ("SELL" if "DUMP" in action else raw_act)
-                        price = ask if "BUY" in trade_act else bid
+                        price = current_ask if "BUY" in trade_act else current_bid
                         
                         trade_res = trader.execute(m_poly['title'], b['bucket'], trade_act, price, reason=reason)
                         
@@ -1254,7 +1305,7 @@ def run():
                             print(f"   👉 {trade_res}")
                             context = {
                                 "predicted_mean": pred_mean,
-                                "predicted_std": pred_std,
+                                "predicted_std": effective_std,
                                 "fair_value": fair_val,
                                 "pace_24h": pace_24h,
                                 "hours_left": m_poly['hours'],
