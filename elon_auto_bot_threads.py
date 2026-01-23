@@ -412,6 +412,7 @@ class HawkesBrain:
                     ev += 1; l_boost += a
             sims.append(ev)
         return sims
+
 # ==========================================
 # 3. SENSOR DE TWEETS (OPTIMIZADO)
 # ==========================================
@@ -449,6 +450,7 @@ class PolymarketSensor:
 
             # 2. Obtención del Conteo
             count = d.get('stats', {}).get('total', 0)
+            days_elapsed = d.get('stats', {}).get('daysElapsed', 0)
 
             # 3. FILTRO DE VISIBILIDAD GENÉRICO
             # Si le quedan horas (o acaba de terminar hace menos de 2h), lo mostramos.
@@ -458,6 +460,7 @@ class PolymarketSensor:
                     'title': t['title'], 
                     'count': count, 
                     'hours': hours, # Esta hora ahora es CORRECTA (hasta las 18:00)
+                    'daily_avg': days_elapsed  > 0 and count > 0 and (count / days_elapsed) or 0.0,
                     'active': True 
                 }
 
@@ -1096,6 +1099,42 @@ def run():
                     final_sims = np.array([m_poly['count'] + s for s in sims])
                     
                     pred_mean = np.mean(final_sims)
+
+                    # -----------------------------------------------------------
+                    # 🧠 CEREBRO HÍBRIDO (HAWKES + DAILY AVERAGE)
+                    # -----------------------------------------------------------
+                    
+                    # Recuperamos el promedio diario que ya calculaste
+                    daily_avg = m_poly.get('daily_avg', 0.0)
+                    
+                    # Solo aplicamos la corrección si tenemos un promedio histórico válido
+                    if daily_avg > 0:
+                        # 1. Convertimos ritmo diario a ritmo horario
+                        linear_pace_hourly = daily_avg / 24.0
+                        
+                        # 2. Proyección Lineal: Dónde acabaría si sigue siendo "normal"
+                        linear_projection = m_poly['count'] + (linear_pace_hourly * hours_to_predict)
+                        
+                        # 3. La Mezcla (Weighted Ensemble)
+                        # 70% Hawkes (Detecta acelerones recientes/excitación)
+                        # 30% Historia (El peso de la realidad diaria)
+                        
+                        # OPCIONAL: Si la diferencia es brutal (>30%), confiamos más en la historia
+                        # para evitar alucinaciones extremas.
+                        diff_ratio = abs(pred_mean - linear_projection) / linear_projection
+                        
+                        if diff_ratio > 0.30:
+                            # Si Hawkes se desvía más de un 30%, le bajamos los humos (50/50)
+                            adjusted_mean = (pred_mean * 0.50) + (linear_projection * 0.50)
+                            # print(f"   ⚖️ CORRECCIÓN FUERTE: Hawkes demasiado loco. Ajustando...")
+                        else:
+                            # Si es razonable, mantenemos preferencia por Hawkes (70/30)
+                            adjusted_mean = (pred_mean * 0.70) + (linear_projection * 0.30)
+                        
+                        pred_mean = adjusted_mean
+                        
+                    # -----------------------------------------------------------
+
                     pred_std = np.std(final_sims)
                     
                     if pred_std < 0.01: pred_std = 0.01
@@ -1116,7 +1155,7 @@ def run():
 
                 print("-" * 75)
                 print(f"\n>>> {m_poly['title']}{blind_tag}")
-                print(f"    📊 Act: {m_poly['count']} | 🧠 Gauss: μ={pred_mean:.1f} σ={pred_std:.1f} | ⏳ Quedan: {time_str}")
+                print(f"    📊 Act: {m_poly['count']} Avg: {m_poly['daily_avg']:.0f} | 🧠 Gauss: μ={pred_mean:.1f} σ={pred_std:.1f} | ⏳ Quedan: {time_str}")
                 print("-" * 75)
                 print(f"{'BUCKET':<10} | {'BID':<8} | {'ASK':<8} | {'FAIR':<8} | {'ACCIÓN':<10} | {'MOTIVO'}")
                 
