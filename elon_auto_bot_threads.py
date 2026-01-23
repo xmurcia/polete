@@ -1268,14 +1268,28 @@ def run():
                         continue 
 
                     action = "-"; reason = "_"; special_tag = ""
-
                     spread = current_ask - current_bid
                     spread_pct = (spread / current_ask) if current_ask > 0 else 1.0
+                    bad_spread = spread > 0.05 and spread_pct > 0.20
+
+                    # ---------------------------------------------------------
+                    # 👻 FILTRO GLOBAL ANTI-FANTASMAS
+                    # Evita comprar Value o Lotto si el libro está vacío (Ask 0.001 / Bid 0.0)
+                    # ---------------------------------------------------------
+                    is_ghost_market = (current_ask <= 0.005 and current_bid == 0.0)
+                    
+                    if is_ghost_market:
+                        # Si es fantasma, solo permitimos VENDER si ya lo tenemos (por si acaso),
+                        # pero PROHIBIMOS COMPRAR bajo cualquier concepto.
+                        # Forzamos un 'continue' si no tenemos posición que cerrar.
+                        if my_pos_data:
+                            pass # Dejamos pasar para ver si el Smart Exit quiere vender (aunque con bid 0 no podrá)
+                        else:
+                            # Si no tenemos nada, ignoramos este bucket corrupto
+                            continue 
+                    # ---------------------------------------------------------
                     
                     # --- LÓGICA DE TRADING ---
-                    
-                    bad_spread = spread > 0.05 and spread_pct > 0.20
-                    
                     # A. VALUE
                     if action == "-":
                         is_cheap = (current_ask < 0.05)
@@ -1285,10 +1299,22 @@ def run():
                         elif current_bid > 0.10 and fair_val < (current_bid - 0.10): 
                             action = f"🔴 SELL"; diff = current_bid - fair_val; reason = f"Sobreprecio +{diff:.2f}"
 
-                    # B. LOTTO (CORREGIDO)
+                    # B. LOTTO (ANTI-GHOST PATCH 👻)
+                    # Solo entramos si:
+                    # 1. Es un mercado a largo plazo.
+                    # 2. Hay ritmo (Pace > 3.2).
+                    # 3. NO ES UN PRECIO FANTASMA (Bid > 0 requiere contrapartida real).
                     if action == "-" and is_long_term and pace_status != "🔰 WARMUP":
                         dist_from_mean = pred_mean - b['max'] 
-                        if dist_from_mean < -120 and pace_24h > 3.2 and current_ask <= 0.005 and current_ask > 0:
+                        
+                        # CONDICIONES MEJORADAS
+                        is_deep_otm = dist_from_mean < -120
+                        is_active_market = pace_24h > 3.2
+                        is_ghost_price = (current_ask <= 0.002 and current_bid == 0.0) # <--- EL FILTRO CLAVE
+                        
+                        if is_deep_otm and is_active_market and not is_ghost_price:
+                             # Solo compramos si el precio es razonable pero no "roto"
+                             if 0.001 < current_ask <= 0.005:
                                 action = "🎣 FISH"; reason = "Lotto (Active)"; special_tag = "BUY"
 
                     # C. SNIPER
