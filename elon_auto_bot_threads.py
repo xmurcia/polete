@@ -1172,22 +1172,10 @@ def run():
                 # BUCLE PRINCIPAL DE BUCKETS
                 for b in relevant_prices['buckets']:
                     if 'min' not in b: continue 
-                    
-                    # Filtros de visualización para limpiar la pantalla
-                    if b['max'] < m_poly['count']: continue
-                    if b['max'] < min_feasible_total: continue 
-                    
+
                     current_bid = b.get('bid', 0)
                     current_ask = b.get('ask', 0)
                     t_slug = b['bucket']
-
-                    # ============================================
-                    # ⛔ ZONA DE SEGURIDAD: CANDADO NUCLEAR
-                    # ============================================
-                    if IS_WARMUP:
-                        print(f"{b['bucket']:<10} | {current_bid:.3f}    | {current_ask:.3f}    | {'-':<8} | {'-':<10} | 🔒 WARMUP")
-                        continue
-                    # ============================================
 
                     # ============================================
                     # 🧹 SMART EXIT: GARBAGE COLLECTOR (TIME SENSITIVE)
@@ -1244,6 +1232,18 @@ def run():
                                 
                                 continue # Saltamos al siguiente bucket
                     # ============================================
+                    
+                    # Filtros de visualización para limpiar la pantalla
+                    if b['max'] < m_poly['count']: continue
+                    if b['max'] < min_feasible_total: continue 
+                    
+                    # ============================================
+                    # ⛔ ZONA DE SEGURIDAD: CANDADO NUCLEAR
+                    # ============================================
+                    if IS_WARMUP:
+                        print(f"{b['bucket']:<10} | {current_bid:.3f}    | {current_ask:.3f}    | {'-':<8} | {'-':<10} | 🔒 WARMUP")
+                        continue
+                    # ============================================ 
 
                     # CÁLCULO DE PROBABILIDAD (Solo si NO es warmup)
                     prob_min = norm.cdf(b['min'], loc=pred_mean, scale=effective_std)
