@@ -53,29 +53,28 @@ API_CONFIG = {
 
 def is_market_tradable(market_json):
     """
-    Filtro Maestro V9: Decide si un mercado merece ser procesado.
+    Filtro Maestro V10.1: STRICT MODE.
     """
     # 1. Si está cerrado definitivamente (Settled), basura.
     if market_json.get('closed') is True:
         return False
 
     # 2. Filtro de Fecha (El Juez Supremo)
-    # Si la fecha ya pasó, no nos interesa (evita procesar eventos de 2024).
     end_date_str = market_json.get('endDate') # "2026-01-20T17:00:00Z"
     if end_date_str:
         try:
             # Convertimos a objeto fecha consciente de zona horaria
             dt_end = datetime.strptime(end_date_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-            # Damos 2 horas de margen post-cierre para ver el settlement
-            margin = 2 * 3600 
-            if datetime.now(timezone.utc).timestamp() > (dt_end.timestamp() + margin):
+            
+            # --- FIX CRÍTICO: MARGEN CERO ---
+            # Si la fecha ya pasó (aunque sea por 1 segundo), FUERA.
+            # Eliminamos el margen de 2 horas para evitar ver mercados zombies.
+            if datetime.now(timezone.utc).timestamp() > dt_end.timestamp():
                 return False
         except:
             pass # Si falla la fecha, ante la duda lo dejamos pasar (Fail Open)
 
     # 3. NOTA: NO filtramos 'acceptingOrders'. 
-    # Queremos ver el precio aunque el trading esté pausado.
-    
     return True
 
 # --- Ejemplo de uso con tu lista de mercados ---
@@ -1046,11 +1045,26 @@ def run():
                 warn_txt = "⚠️ WARMUP (NO TRADING)" if IS_WARMUP else f"Pace: {pace_24h:.1f} t/h"
                 print(f"\n⏱️ {datetime.now().strftime('%H:%M:%S')} | {current_mode} | {warn_txt}")
 
-            # Func. Auxiliar
+            # Func. Auxiliar CORREGIDA (FIX CRITICO MEZCLA DE FECHAS)
             def titles_match(tracker_title, market_title):
-                t1 = tracker_title.lower(); t2 = market_title.lower()
+                t1 = tracker_title.lower()
+                t2 = market_title.lower()
+                
+                # 1. Limpieza estricta: Si uno contiene el rango del otro literalmente, es match
+                # (Ej: "Jan 23 - Jan 30" está dentro de "Elon Musk Jan 23 - Jan 30")
                 if t1 in t2 or t2 in t1: return True
-                nums1 = set(re.findall(r'\d+', t1)); nums2 = set(re.findall(r'\d+', t2))
+                
+                # 2. Comparación Numérica INTELIGENTE (Ignorando Años)
+                # Extraemos números, pero filtramos '2025', '2026' para evitar falsos positivos por el año.
+                def get_relevant_nums(txt):
+                    nums = set(re.findall(r'\d+', txt))
+                    return {n for n in nums if n not in ['2024', '2025', '2026']}
+
+                nums1 = get_relevant_nums(t1)
+                nums2 = get_relevant_nums(t2)
+                
+                # AHORA la intersección entre "16-23" y "23-30" será solo {'23'}.
+                # Len 1 < 2. NO hará match. Correcto.
                 return len(nums1.intersection(nums2)) >= 2
             
             # --- 6. GESTIÓN ACTIVA DE PORTAFOLIO (ANNICA) ---
