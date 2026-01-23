@@ -1178,7 +1178,7 @@ def run():
                     t_slug = b['bucket']
 
                     # ============================================
-                    # 🧹 SMART EXIT: GARBAGE COLLECTOR (TIME SENSITIVE)
+                    # 🧹 SMART EXIT: GARBAGE COLLECTOR (ASYMMETRIC)
                     # ============================================
                     my_pos_data = next((p[1] for p in my_positions if p[0] == t_slug), None)
                     
@@ -1188,49 +1188,59 @@ def run():
                         safe_std = max(effective_std, 10.0) 
                         z_score = dist_to_pred / safe_std
                         
-                        # UMBRAL DINÁMICO
-                        if hours_to_predict > 48.0: sigma_limit = 4.0
-                        elif hours_to_predict > 24.0: sigma_limit = 3.0
-                        else: sigma_limit = 2.0
-                        
-                        IS_INVALID_THESIS = z_score > sigma_limit
                         my_avg_price = my_pos_data['avg_price']
                         
-                        if IS_INVALID_THESIS and current_bid > 0.001:
-                            
-                            # A) LOTTO FLIP (Take Profit)
-                            is_profit_flip = False
-                            if current_bid > my_avg_price:
-                                profit_pct = 0
-                                if my_avg_price > 0: profit_pct = ((current_bid - my_avg_price) / my_avg_price) * 100
-                                if profit_pct > 10.0: is_profit_flip = True
+                        # --- LÓGICA ASIMÉTRICA ---
+                        
+                        should_sell = False
+                        action_tag = ""
+                        reason_tag = ""
 
-                            # B) SALVAGE (Recta Final)
-                            is_salvage = False
-                            if not is_profit_flip and hours_to_predict < 24.0:
+                        # 1. ¿TENEMOS GANANCIA? (MODO AVARICIA) 🤑
+                        # Somos estrictos: Si la tesis se debilita un poco (> 2.0 sigmas)
+                        # y tenemos dinero sobre la mesa, lo cogemos.
+                        if current_bid > my_avg_price:
+                            profit_pct = 0
+                            if my_avg_price > 0: profit_pct = ((current_bid - my_avg_price) / my_avg_price) * 100
+                            
+                            # Si estamos a más de 2 sigmas (algo improbable) y ganamos >10%... FUERA.
+                            # Tu caso: 740+ está a 3.3 sigmas. Entrará aquí.
+                            if z_score > 2.0 and profit_pct > 10.0:
+                                should_sell = True
+                                action_tag = "💰 EXIT"
+                                reason_tag = f"Take Profit (Weak Thesis {z_score:.1f}σ)"
+
+                        # 2. ¿TENEMOS PÉRDIDA? (MODO PACIENCIA) 🧘
+                        # Somos laxos: Solo asumimos la pérdida si es casi imposible o se acaba el tiempo.
+                        elif hours_to_predict < 24.0:
+                            # Recta final: Limpieza media
+                            if z_score > 2.0: 
                                 recoverable_ratio = 0
                                 if my_avg_price > 0: recoverable_ratio = current_bid / my_avg_price
-                                if recoverable_ratio > 0.20: is_salvage = True
+                                if recoverable_ratio > 0.20:
+                                    should_sell = True
+                                    action_tag = "💀 EXIT"
+                                    reason_tag = f"Salvage Final ({z_score:.1f}σ)"
+                        else:
+                            # Queda mucho tiempo (>24h): Solo vendemos si es ABSURDO (> 4.0 sigmas)
+                            if z_score > 4.0 and current_bid > 0.002:
+                                should_sell = True
+                                action_tag = "🗑️ DUMP"
+                                reason_tag = f"Trash Cleaning ({z_score:.1f}σ)"
 
-                            # EJECUCIÓN
-                            if is_profit_flip or is_salvage:
-                                action_tag = "💰 EXIT" if is_profit_flip else "💀 EXIT"
-                                reason_tag = f"Take Profit ({z_score:.1f}σ)" if is_profit_flip else f"Salvage ({z_score:.1f}σ)"
-                                
-                                # 1. Ejecutar Venta (Actualiza Portfolio y CSV)
-                                trade_res = trader.execute(m_poly['title'], t_slug, action_tag, current_bid, reason=reason_tag)
-                                
-                                # 2. Guardar Snapshot (FOTO AUDITORÍA)
-                                if trade_res:
-                                    print(f"{t_slug:<10} | {current_bid:.3f}    | {current_ask:.3f}    | {'-':<8} | {action_tag:<10} | {reason_tag}")
-                                    context = {
-                                        "predicted_mean": pred_mean, "predicted_std": effective_std,
-                                        "z_score": z_score, "hours_left": hours_to_predict,
-                                        "my_avg_price": my_avg_price, "current_bid": current_bid
-                                    }
-                                    save_trade_snapshot(action_tag, m_poly['title'], t_slug, current_bid, reason_tag, context)
-                                
-                                continue # Saltamos al siguiente bucket
+                        # --- EJECUCIÓN ---
+                        if should_sell:
+                            trade_res = trader.execute(m_poly['title'], t_slug, action_tag, current_bid, reason=reason_tag)
+                            if trade_res:
+                                print(f"{t_slug:<10} | {current_bid:.3f}    | {current_ask:.3f}    | {'-':<8} | {action_tag:<10} | {reason_tag}")
+                                context = {
+                                    "predicted_mean": pred_mean, "predicted_std": effective_std,
+                                    "z_score": z_score, "hours_left": hours_to_predict,
+                                    "my_avg_price": my_avg_price, "current_bid": current_bid
+                                }
+                                save_trade_snapshot(action_tag, m_poly['title'], t_slug, current_bid, reason_tag, context)
+                            
+                            continue # Saltamos al siguiente bucket
                     # ============================================
                     
                     # Filtros de visualización para limpiar la pantalla
