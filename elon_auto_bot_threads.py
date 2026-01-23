@@ -1101,37 +1101,37 @@ def run():
                     pred_mean = np.mean(final_sims)
 
                     # -----------------------------------------------------------
-                    # 🧠 CEREBRO HÍBRIDO (HAWKES + DAILY AVERAGE)
+                    # 🧠 CEREBRO HÍBRIDO DINÁMICO (HAWKES + LINEAR)
                     # -----------------------------------------------------------
-                    
-                    # Recuperamos el promedio diario que ya calculaste
                     daily_avg = m_poly.get('daily_avg', 0.0)
                     
-                    # Solo aplicamos la corrección si tenemos un promedio histórico válido
                     if daily_avg > 0:
-                        # 1. Convertimos ritmo diario a ritmo horario
                         linear_pace_hourly = daily_avg / 24.0
-                        
-                        # 2. Proyección Lineal: Dónde acabaría si sigue siendo "normal"
                         linear_projection = m_poly['count'] + (linear_pace_hourly * hours_to_predict)
                         
-                        # 3. La Mezcla (Weighted Ensemble)
-                        # 70% Hawkes (Detecta acelerones recientes/excitación)
-                        # 30% Historia (El peso de la realidad diaria)
+                        # AJUSTE DINÁMICO DE PESOS SEGÚN TIEMPO RESTANTE
+                        # Si queda mucho tiempo (>24h), confiamos más en la media histórica (Lineal).
+                        # Si queda poco tiempo (<24h), confiamos más en la ráfaga actual (Hawkes).
                         
-                        # OPCIONAL: Si la diferencia es brutal (>30%), confiamos más en la historia
-                        # para evitar alucinaciones extremas.
-                        diff_ratio = abs(pred_mean - linear_projection) / linear_projection
-                        
-                        if diff_ratio > 0.30:
-                            # Si Hawkes se desvía más de un 30%, le bajamos los humos (50/50)
-                            adjusted_mean = (pred_mean * 0.50) + (linear_projection * 0.50)
-                            # print(f"   ⚖️ CORRECCIÓN FUERTE: Hawkes demasiado loco. Ajustando...")
+                        if hours_to_predict > 24.0:
+                            # Evento Largo: La media manda.
+                            # 60% Lineal (Estabilidad) / 40% Hawkes (Tendencia)
+                            weight_linear = 0.60
+                            weight_hawkes = 0.40
                         else:
-                            # Si es razonable, mantenemos preferencia por Hawkes (70/30)
-                            adjusted_mean = (pred_mean * 0.70) + (linear_projection * 0.30)
+                            # Evento Corto: El momentum manda.
+                            # 30% Lineal / 70% Hawkes
+                            weight_linear = 0.30
+                            weight_hawkes = 0.70
+                            
+                        # Cálculo de la mezcla
+                        adjusted_mean = (pred_mean * weight_hawkes) + (linear_projection * weight_linear)
+                        
+                        # Debug
+                        # print(f"   ⚖️ Híbrido ({hours_to_predict:.1f}h left): Hawkes {pred_mean:.0f} (x{weight_hawkes}) + Linear {linear_projection:.0f} (x{weight_linear}) -> {adjusted_mean:.0f}")
                         
                         pred_mean = adjusted_mean
+                    # ...
                         
                     # -----------------------------------------------------------
 
