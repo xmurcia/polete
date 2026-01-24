@@ -1308,7 +1308,7 @@ def run():
                     if action == "-":
                         is_cheap = (current_ask < 0.05)
                         ok_spread = (not bad_spread) or is_cheap
-                        if current_ask > 0 and fair_val > (current_ask + 0.10) and ok_spread: 
+                        if current_ask > 0 and fair_val > (current_ask + 0.15) and ok_spread: 
                             action = f"🟢 BUY"; diff = fair_val - current_ask; reason = f"Value +{diff:.2f}"
                         elif current_bid > 0.10 and fair_val < (current_bid - 0.10): 
                             action = f"🔴 SELL"; diff = current_bid - fair_val; reason = f"Sobreprecio +{diff:.2f}"
