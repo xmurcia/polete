@@ -4,3 +4,7 @@ venv/
 *.pyc
 .DS_Store
 .idea/  
+polete-volume
+polete-volume/market_tape/*
+polete-volume/snapshots/*
+polete-volume.tar.gz
