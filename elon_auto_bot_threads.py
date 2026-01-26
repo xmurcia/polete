@@ -408,156 +408,177 @@ class PaperTrader:
 # 🚀 EJECUCIÓN V11.1
 # ==============================================================================
 def run():
-    print("🤖 ELON BOT V11.1 [HYBRID REAL + FAST SCAN]")
+    print("🤖 ELON BOT V11.2 [HYBRID REAL + TWEET RECORDER]")
     
-    # Inicialización de componentes
+    # Inicialización
     brain = HawkesBrain()
-    sensor = PolymarketSensor() # Xtracker (Tweets)
-    pricer = ClobMarketScanner() # Gamma (Precios)
+    sensor = PolymarketSensor() # Xtracker
+    pricer = ClobMarketScanner() # Gamma
     trader = PaperTrader()
     
-    # Cargar historial para Warmup
+    # Cargar Historial
     last_tweets = []
     if os.path.exists(FILES['history']):
         try:
-            with open(FILES['history']) as f: last_tweets = [e['timestamp'] for e in json.load(f)]
-        except: pass
+            with open(FILES['history']) as f: 
+                data = json.load(f)
+                # Soporte para lista de objetos o lista plana
+                if data and isinstance(data[0], dict):
+                    last_tweets = [e['timestamp'] for e in data]
+                else:
+                    last_tweets = data
+            print(f"📂 Historial cargado: {len(last_tweets)} tweets.")
+        except Exception as e:
+            print(f"⚠️ Error cargando historial: {e}")
 
-    # VELOCIDAD DE ESCANEO (Antes 60s, Ahora 6s)
-    REFRESH_RATE = 6 
+    # Variables de Control
+    REFRESH_RATE = 3
+    last_known_counts = {} # Para detectar cambios: {market_id: count}
 
     while True:
         try:
             start_time = time.time()
             
-            # 1. Obtener Datos (Infra V10)
+            # 1. Obtener Datos
             markets_xtracker = sensor.get_active_counts()
             clob_data = pricer.get_market_prices()
             
             if not markets_xtracker:
-                print(f"💤 Sin mercados activos (Xtracker)... Reintentando en {REFRESH_RATE}s", end="\r")
+                print(f"💤 Sin mercados activos... Reintentando en {REFRESH_RATE}s", end="\r")
                 time.sleep(REFRESH_RATE)
                 continue
+
+            # ⚡ DETECTOR DE TWEETS & GRABADO (NUEVO)
+            # Ordenamos por count descendente para usar el mercado más activo como "Maestro"
+            markets_xtracker.sort(key=lambda x: x['count'], reverse=True)
+            master_m = markets_xtracker[0]
+            master_id = master_m['id']
+            current_count = master_m['count']
+            
+            # Inicializar tracking si es la primera vez
+            if master_id not in last_known_counts:
+                last_known_counts[master_id] = current_count
+            
+            # Detectar cambio
+            delta = current_count - last_known_counts[master_id]
+            if delta > 0:
+                print(f"\n🐦 ¡NUEVO TWEET DETECTADO! (+{delta})")
+                now_ts = time.time()
+                
+                # Añadir timestamps y Guardar
+                for _ in range(int(delta)): last_tweets.append(now_ts)
+                
+                # Guardado Seguro
+                try:
+                    with open(FILES['history'], 'w') as f:
+                        # Guardamos formato compatible lista de objetos
+                        json.dump([{'timestamp': t} for t in last_tweets], f, indent=2)
+                    print(f"💾 Historial actualizado: {len(last_tweets)} tweets.")
+                except Exception as e:
+                    print(f"❌ Error guardando historial: {e}")
+                
+                # Actualizar referencia
+                last_known_counts[master_id] = current_count
 
             # Warmup Check
             IS_WARMUP = len(last_tweets) < 5
             
-            # 2. Bucle de Mercados
+            # 2. Bucle de Mercados (Trading)
             for m_poly in markets_xtracker:
                 m_title = m_poly['title']
                 
-                # Buscar precios correspondientes (Matching Paranoico)
+                # Match Paranoico de Títulos
                 m_clob = next((c for c in clob_data if titles_match_paranoid(m_title, c['title'])), None)
                 if not m_clob: continue
                 
-                # Grabar Tape (V11 Feature)
+                # Grabar Tape
                 tape_rec = {'timestamp': time.time(), 'market': m_title, 'buckets': m_clob['buckets']}
                 append_to_json_file(FILES['market_tape'], tape_rec)
 
-                # 3. Predicciones V11 (Hybrid Brain)
+                # 3. Predicciones V11
                 pred_sims = brain.predict(last_tweets, m_poly['hours'])
-                # Factor biológico simplificado para la simulación media
                 pred_sims_val = [s * 1.0 for s in pred_sims] 
                 final_sims = np.array([m_poly['count'] + s for s in pred_sims_val])
                 
                 pred_mean = np.mean(final_sims)
                 pred_std = np.std(final_sims)
-                if pred_std < 5: pred_std = 5.0 # Suelo de seguridad
+                if pred_std < 5: pred_std = 5.0
                 
-                # Hybrid Consensus (Fusión con Mercado)
+                # Consenso Híbrido
                 mkt_consensus = brain.get_market_consensus(m_poly, m_clob['buckets'])
                 if mkt_consensus:
                     combined_mean = (pred_mean * (1 - MARKET_WEIGHT)) + (mkt_consensus * MARKET_WEIGHT)
-                    conflict = abs(pred_mean - mkt_consensus)
-                    # Si hay conflicto, aumentamos la desviación estándar (más prudencia)
-                    effective_std = max(pred_std + (conflict/4), 5.0)
+                    effective_std = max(pred_std + (abs(pred_mean - mkt_consensus)/4), 5.0)
                 else:
                     combined_mean = pred_mean
                     effective_std = pred_std
 
-                # Contexto para la Tabla Visual
-                stats_ctx = {
-                    "count": m_poly['count'], 
-                    "mean": combined_mean, 
-                    "std": effective_std, 
-                    "hours": m_poly['hours']
-                }
+                stats_ctx = {"count": m_poly['count'], "mean": combined_mean, "std": effective_std, "hours": m_poly['hours']}
                 
-                # 4. MOTOR DE DECISIÓN V11
+                # 4. MOTOR DE DECISIÓN
                 my_buckets = trader.get_owned_buckets_val(m_title)
-                decisions_log = [] # Aquí guardamos las acciones para pintarlas en la tabla
+                decisions_log = []
                 
-                # Pre-cálculo de Fair Value para enriquecer la visualización
+                # Pre-cálculo Fair Value
                 for b in m_clob['buckets']:
                     p_min = norm.cdf(b['min'], combined_mean, effective_std)
                     p_max = norm.cdf(b['max'], combined_mean, effective_std)
                     fair = p_max - p_min
                     if "+" in b['bucket']: fair = 1.0 - p_min
-                    b['fair'] = fair # Inyectamos 'fair' en el objeto bucket para usarlo abajo
+                    b['fair'] = fair 
 
-                # Bucle de Buckets
+                # Análisis de Buckets
                 for b in m_clob['buckets']:
                     bid = b['bid']; ask = b['ask']; fair = b['fair']
-                    
-                    # Z-Score
                     b_mid = (b['min'] + b['max']) / 2
                     z_score = abs(b_mid - combined_mean) / effective_std
                     
-                    # Estado Posición
                     pos_key = f"{m_title} | {b['bucket']}"
                     has_pos = pos_key in trader.portfolio['positions']
                     
-                    context = {
-                        "combined_mean": combined_mean, "z_score": z_score, 
-                        "fair": fair, "hours": m_poly['hours']
-                    }
+                    context = {"combined_mean": combined_mean, "z_score": z_score, "fair": fair, "hours": m_poly['hours']}
 
-                    # --- A. COMPRA (Sniper + Cluster) ---
+                    # A. COMPRA
                     if not has_pos and not IS_WARMUP:
-                        # Filtros
-                        if z_score > MAX_Z_SCORE_ENTRY: continue
-                        if ask < MIN_PRICE_ENTRY: continue
-                        
-                        # Cluster check
-                        if ENABLE_CLUSTERING and my_buckets:
-                            if not any(abs(b_mid - ov) <= CLUSTER_RANGE for ov in my_buckets): continue
-                        
-                        # Value Logic
-                        if fair > (ask + 0.15):
-                            shares = min(trader.portfolio['cash'] / ask, 500)
-                            if shares > 10:
-                                reason = f"Value +{fair-ask:.2f}"
-                                trader.execute("BUY", m_title, b['bucket'], ask, shares, reason, context)
-                                decisions_log.append({'bucket': b['bucket'], 'action': 'BUY', 'reason': reason})
+                        # Filtros V11
+                        if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
+                            is_cluster_ok = True
+                            if ENABLE_CLUSTERING and my_buckets:
+                                is_cluster_ok = any(abs(b_mid - ov) <= CLUSTER_RANGE for ov in my_buckets)
+                            
+                            # Value Trigger
+                            if is_cluster_ok and fair > (ask + 0.15):
+                                shares = min(trader.portfolio['cash'] / ask, 500)
+                                if shares > 10:
+                                    reason = f"Val+{fair-ask:.2f}"
+                                    trader.execute("BUY", m_title, b['bucket'], ask, shares, reason, context)
+                                    decisions_log.append({'bucket': b['bucket'], 'action': 'BUY', 'reason': reason})
 
-                    # --- B. VENTA (Rotación + Profit) ---
+                    # B. VENTA
                     elif has_pos:
                         pos = trader.portfolio['positions'][pos_key]
                         entry = pos['entry_price']
-                        profit_pct = (bid - entry) / entry if entry > 0 else 0
+                        profit = (bid - entry) / entry if entry > 0 else 0
                         
-                        # Rotación (Stop Loss Táctico)
-                        if z_score > 2.0:
+                        if z_score > 2.0: # Rotación
                             reason = f"Rot(Z={z_score:.1f})"
                             trader.execute("ROTATE", m_title, b['bucket'], bid, pos['shares'], reason, context)
                             decisions_log.append({'bucket': b['bucket'], 'action': 'ROTATE', 'reason': reason})
-                        
-                        # Take Profit
-                        elif profit_pct > 0.30 and z_score > 1.8:
-                            reason = f"Pft+{profit_pct*100:.0f}%"
+                        elif profit > 0.30 and z_score > 1.8: # Take Profit
+                            reason = f"Pft+{profit*100:.0f}%"
                             trader.execute("TAKE_PROFIT", m_title, b['bucket'], bid, pos['shares'], reason, context)
                             decisions_log.append({'bucket': b['bucket'], 'action': 'PROFIT', 'reason': reason})
                 
-                # IMPRIMIR TABLA VISUAL (V10 Style)
+                # Imprimir Tabla
                 trader.print_market_summary(m_title, stats_ctx, m_clob['buckets'], decisions_log)
 
-            # Resumen Global
+            # Imprimir Portfolio
             trader.print_portfolio_summary()
             
-            # Control de Velocidad
+            # Control de Tiempos
             elapsed = time.time() - start_time
-            sleep_time = max(0.5, REFRESH_RATE - elapsed)
-            print(f"⏱️ Scan took {elapsed:.2f}s | Sleeping {sleep_time:.1f}s...", end="\r")
+            sleep_time = max(0.1, REFRESH_RATE - elapsed)
+            print(f"⏱️ Scan took {elapsed:.2f}s | Sleeping {sleep_time:.1f}s... (Tweets: {len(last_tweets)})", end="\r")
             time.sleep(sleep_time)
 
         except KeyboardInterrupt: break
