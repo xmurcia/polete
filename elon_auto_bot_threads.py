@@ -455,11 +455,12 @@ class MarketPanicSensor:
                         alerts.append({'type': 'DUMP', 'market_title': m['title'], 'bucket': b['bucket'], 'price': b['bid'], 'min': b.get('min',0)})
         return alerts
 
+
 # ==========================================
-# 6. DIRECTOR (V12.7 - REALITY CHECK & DYNAMIC STD)
+# 6. DIRECTOR (V12.8 - ACTIVE SNIPER MODE)
 # ==========================================
 def run():
-    print("\n🤖 ELON-BOT V12.7 (REALITY CHECK ACTIVATED)")
+    print("\n🤖 ELON-BOT V12.8 (ACTIVE SNIPER MODE)")
     
     # Utiles V10
     def log_monitor(msg):
@@ -559,8 +560,6 @@ def run():
                         final_mean = (pred_mean_hawkes * (1-MARKET_WEIGHT)) + (consensus * MARKET_WEIGHT)
                     
                     # --- FIX 1: SIGMA DINÁMICA ---
-                    # Si queda poco tiempo, permitimos que la sigma sea pequeña (precisión)
-                    # Si queda mucho, mantenemos el suelo de 5.0 (incertidumbre)
                     if m_poly['hours'] < 2.0:
                         std_floor = 0.5 
                     else:
@@ -591,8 +590,6 @@ def run():
                         bid, ask = b.get('bid',0), b.get('ask',0)
                         
                         # --- FIX MATEMÁTICO (Z-SCORE INFINITO) ---
-                        # Si es un bucket final (ej: 740+), el máximo es 99999.
-                        # Asumimos un ancho estándar de 20 para calcular el punto medio real.
                         if b['max'] >= 99999:
                             mid = b['min'] + 20
                         else:
@@ -634,14 +631,12 @@ def run():
 
                         elif not owned and not IS_WARMUP:
                             # --- FIX 2: REALITY CHECK (FILTRO FÍSICO) ---
-                            # Si queda menos de 1 hora, calculamos si es humanamente posible llegar
                             is_impossible = False
                             if m_poly['hours'] < 1.0:
                                 tweets_needed = b['min'] - m_poly['count']
-                                # Si necesita más de 15 tweets/hora, asumimos imposible
                                 if tweets_needed > (m_poly['hours'] * 15): 
                                     is_impossible = True
-                                    reason = "Impossible Pace" # Para debug si lo imprimiéramos
+                                    reason = "Impossible Pace" 
 
                             if not is_impossible:
                                 if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
@@ -649,14 +644,16 @@ def run():
                                     if ENABLE_CLUSTERING and my_buckets:
                                         is_neighbor = any(abs(mid - ov) <= CLUSTER_RANGE for ov in my_buckets)
                                     
-                                    if is_neighbor and fair > (ask + 0.15):
-                                        action = "BUY"; reason = f"Val+{fair-ask:.2f}"
+                                    # --- CAMBIO V12.8: UMBRAL MÁS BAJO ---
+                                    # Bajamos exigencia de 0.15 a 0.05
+                                    edge = fair - ask
+                                    if is_neighbor and edge > 0.05:
+                                        action = "BUY"; reason = f"Val+{edge:.2f}"
                                         res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
                                         if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
 
-                        # PRINT INCONDICIONAL (SIN FILTROS)
+                        # PRINT INCONDICIONAL
                         color_act = f"🟢 {action}" if "BUY" in action else (f"🔴 {action}" if "ROTATE" in action or "PROFIT" in action else "-")
-                        # Colorear buckets propios en azul visualmente
                         bucket_display = f"*{b['bucket']}" if owned else f"{b['bucket']}"
                         print(f"{bucket_display:<10} | {bid:.3f}  | {ask:.3f}  | {fair:.3f}  | {z_score:.1f}   | {color_act} {reason}")
 
