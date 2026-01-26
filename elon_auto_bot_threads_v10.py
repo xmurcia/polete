@@ -4,13 +4,13 @@ import os
 import requests
 import numpy as np
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import dateutil.parser
 from scipy.stats import norm
 
 # ==============================================================================
-# CONFIGURACIÓN MAESTRA V11.5 (V10 SENSOR + V11 BRAIN)
+# CONFIGURACIÓN (V11.7 - BACK TO BASICS)
 # ==============================================================================
 LOGS_DIR = 'logs'
 if not os.path.exists(LOGS_DIR): os.makedirs(LOGS_DIR)
@@ -23,22 +23,14 @@ FILES = {
     'market_tape': os.path.join(LOGS_DIR, "market_tape_merged.json")
 }
 
-# CABECERAS REALES (ANTI-BLOQUEO)
 API_CONFIG = {
     'base_url': "https://xtracker.polymarket.com/api",
     'gamma_url': "https://gamma-api.polymarket.com/events",
     'clob_url': "https://clob.polymarket.com/prices",
-    'user': "elonmusk",
-    'headers': {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://polymarket.com/",
-        "Origin": "https://polymarket.com"
-    }
+    'user': "elonmusk"
 }
 
-# PARAMETROS SNIPER V11
+# PARAMETROS ESTRATEGIA
 MAX_Z_SCORE_ENTRY = 1.6
 MIN_PRICE_ENTRY = 0.02
 ENABLE_CLUSTERING = True
@@ -63,13 +55,12 @@ def append_to_json_file(filename, new_record):
     try:
         with open(temp, 'w') as f: json.dump(data_list, f, indent=2)
         os.replace(temp, filename)
-    except Exception as e: print(f"❌ Error IO {filename}: {e}")
+    except Exception: pass
 
 def titles_match_paranoid(tracker_title, market_title):
     t1 = tracker_title.lower(); t2 = market_title.lower()
     if t1 in t2 or t2 in t1: return True
-    def get_nums(txt):
-        return {n for n in re.findall(r'\d+', txt) if n not in ['2024', '2025', '2026']}
+    def get_nums(txt): return {n for n in re.findall(r'\d+', txt) if n not in ['2024', '2025', '2026']}
     return len(get_nums(t1).intersection(get_nums(t2))) >= 2
 
 # ==============================================================================
@@ -122,24 +113,20 @@ class HawkesBrain:
         return np.mean(sims), np.std(sims)
 
 # ==============================================================================
-# 📡 SENSOR POLYMARKET V10 RESTAURADO (CON CABECERAS V11)
+# 📡 SENSOR V10 ORIGINAL (EL QUE FUNCIONABA)
 # ==============================================================================
 class PolymarketSensor:
     def __init__(self):
         self.s = requests.Session()
-        # MANTENEMOS LAS CABECERAS NUEVAS PARA EVITAR BLOQUEOS
-        self.s.headers.update(API_CONFIG['headers'])
+        # Header simple V10
+        self.s.headers.update({"User-Agent": "Mozilla/5.0"})
 
-    # --- MÉTODO V10 RECUPERADO ---
     def _fetch_tracking_detail(self, t, now):
         try:
-            # Petición segura a la API
+            # 1. Petición segura a la API
             url = f"{API_CONFIG['base_url']}/trackings/{t['id']}?includeStats=true"
-            r = self.s.get(url, timeout=10)
-            
-            if r.status_code != 200: return None # Evita crash por bloqueo
-            
-            response = r.json()
+            # Timeout simple de 5s como en V10
+            response = self.s.get(url, timeout=5).json()
             d = response.get('data', {})
             
             end_date_str = d.get('endDate') or t.get('endDate')
@@ -158,43 +145,46 @@ class PolymarketSensor:
                     # C. Calculamos las horas restantes
                     hours = (fixed_end_date - now).total_seconds() / 3600.0
                     
-                except Exception: pass
+                except Exception:
+                    pass
 
             # 2. Obtención del Conteo
             count = d.get('stats', {}).get('total', 0)
-            
-            # 3. FILTRO DE VISIBILIDAD
+            days_elapsed = d.get('stats', {}).get('daysElapsed', 0)
+
+            # 3. FILTRO DE VISIBILIDAD GENÉRICO
             if hours > -2.0:
                 return {
                     'id': t['id'], 
                     'title': t['title'], 
                     'count': count, 
                     'hours': hours,
+                    'daily_avg': days_elapsed > 0 and count/days_elapsed or 0,
                     'active': True 
                 }
 
-        except Exception: pass
+        except Exception:
+            pass
         return None 
 
     def get_active_counts(self):
-        """Método Principal que orquesta la descarga"""
         url = f"{API_CONFIG['base_url']}/users/{API_CONFIG['user']}"
         try:
-            r = self.s.get(url, timeout=15)
-            if r.status_code != 200:
-                print(f"⚠️ API Status {r.status_code}: Posible bloqueo.")
-                return []
+            r = self.s.get(url, timeout=5)
+            # Si falla, devolvemos vacio sin bloquear ni imprimir errores raros
+            if r.status_code != 200: return []
             
             trackings = r.json().get('data', {}).get('trackings', [])
             res = []
             now = datetime.now(timezone.utc)
             
-            with ThreadPoolExecutor(max_workers=3) as ex:
+            # Usamos ThreadPool como en V10
+            with ThreadPoolExecutor(max_workers=5) as ex:
                 futures = [ex.submit(self._fetch_tracking_detail, t, now) for t in trackings]
                 for f in as_completed(futures):
                     if f.result(): res.append(f.result())
             return res
-        except Exception as e:
+        except Exception:
             return []
 
 # ==============================================================================
@@ -203,12 +193,12 @@ class PolymarketSensor:
 class ClobMarketScanner:
     def __init__(self):
         self.s = requests.Session()
-        self.s.headers.update(API_CONFIG['headers'])
+        self.s.headers.update({"User-Agent": "Mozilla/5.0"})
 
     def get_market_prices(self):
         try:
             params = {"limit": 100, "active": "true", "closed": "false", "archived": "false", "order": "volume24hr", "ascending": "false"}
-            r = self.s.get(API_CONFIG['gamma_url'], params=params, timeout=10)
+            r = self.s.get(API_CONFIG['gamma_url'], params=params, timeout=5)
             if r.status_code != 200: return []
             data = r.json()
             
@@ -233,7 +223,7 @@ class ClobMarketScanner:
 
             price_map = {}
             if tokens:
-                bulk = self.s.post(API_CONFIG['clob_url'], json=tokens, timeout=10).json()
+                bulk = self.s.post(API_CONFIG['clob_url'], json=tokens, timeout=5).json()
                 for tid, p in bulk.items():
                     price_map[tid] = {'bid': float(p.get('BUY', 0) or 0), 'ask': float(p.get('SELL', 0) or 0)}
 
@@ -350,7 +340,7 @@ class PaperTrader:
 # 🚀 EJECUCIÓN PRINCIPAL
 # ==============================================================================
 def run():
-    print("🤖 ELON BOT V11.5 [FINAL MERGE: SENSOR V10 + BRAIN V11]")
+    print("🤖 ELON BOT V11.7 [V10 SENSOR + V11 BRAIN]")
     
     brain = HawkesBrain()
     sensor = PolymarketSensor()
@@ -368,7 +358,7 @@ def run():
             print(f"📂 Historial cargado: {len(last_tweets)} tweets.")
         except: pass
 
-    REFRESH_RATE = 6
+    REFRESH_RATE = 3 # Si ves bloqueos, súbelo a 10
     last_known_counts = {}
 
     while True:
@@ -380,7 +370,7 @@ def run():
             clob_data = pricer.get_market_prices()
             
             if not markets_xtracker:
-                print(f"💤 Sin respuesta API (Reintentando)...", end="\r")
+                print(f"💤 Esperando datos API...", end="\r")
                 time.sleep(REFRESH_RATE)
                 continue
 
@@ -485,7 +475,7 @@ def run():
             time.sleep(sleep_time)
 
         except KeyboardInterrupt: break
-        except Exception as e:
+        except Exception:
             time.sleep(5)
 
 if __name__ == "__main__":
