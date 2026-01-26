@@ -457,8 +457,11 @@ class MarketPanicSensor:
 # ==========================================
 # 6. DIRECTOR (V10 ESTRUCTURA + V11 LÓGICA)
 # ==========================================
+# ==========================================
+# 6. DIRECTOR (V12.2 - FULL VISIBILITY)
+# ==========================================
 def run():
-    print("\n🤖 ELON-BOT V10.5 (BASE V10 + LOGICA V11)")
+    print("\n🤖 ELON-BOT V12.2 (FULL VISIBILITY MODE)")
     
     # Utiles V10
     def log_monitor(msg):
@@ -485,7 +488,7 @@ def run():
     def get_bio_multiplier():
         n = datetime.now(); return HOURLY_MULTIPLIERS.get(n.hour, 1.0) * DAILY_MULTIPLIERS.get(n.weekday(), 1.0)
 
-    # Clases V10
+    # Instanciamos clases V10
     brain = HawkesBrain()
     sensor = PolymarketSensor()
     pricer = ClobMarketScanner()
@@ -505,10 +508,12 @@ def run():
 
     while True:
         try:
+            # 1. Obtener Mercados
             markets = sensor.get_active_counts()
             if not markets:
                 print("💤 Waiting for data...", end="\r"); time.sleep(3); continue
 
+            # 2. Tweets
             ts_now = time.time() * 1000
             for m in markets:
                 curr = m['count']
@@ -524,11 +529,14 @@ def run():
             ts_list = [e['timestamp'] for e in global_events]
             IS_WARMUP = len(ts_list) < 5
 
+            # 3. Precios y Analisis
             clob_data = pricer.get_market_prices()
             if clob_data:
+                # Tape
                 if time.time() - last_tape > 1800:
                     save_market_tape(clob_data, markets); last_tape = time.time()
                 
+                # Panic
                 alerts = panic_sensor.analyze(clob_data)
                 for a in alerts:
                     print(f"⚠️ PÁNICO V10: {a['type']} en {a['bucket']} (Price: {a['price']})")
@@ -539,7 +547,7 @@ def run():
                     m_clob = next((c for c in clob_data if titles_match_paranoid(m_poly['title'], c['title'])), None)
                     if not m_clob: continue
 
-                    # 1. PREDICCIÓN HÍBRIDA (V11)
+                    # PREDICCIÓN
                     base_sims = brain.predict(ts_list, m_poly['hours'])
                     pred_mean_hawkes = m_poly['count'] + np.mean(base_sims) * bio_mult
                     
@@ -554,22 +562,24 @@ def run():
                     
                     eff_std = max(np.std(base_sims), 5.0)
 
-                    # 2. VISUALIZACIÓN
+                    # VISUALIZACIÓN
                     d_avg = m_poly.get('daily_avg', 0)
-                    print("-" * 60)
-                    print(f">>> {m_poly['title']} | Act: {m_poly['count']} (Avg: {d_avg:.1f}/d) | 🧠 μ={final_mean:.1f} σ={eff_std:.1f}")
-                    print("-" * 60)
+                    print("-" * 65)
+                    print(f">>> {m_poly['title']}")
+                    print(f"    Tweets: {m_poly['count']} (Avg: {d_avg:.1f}/d) | 🧠 Híbrido: {final_mean:.1f} (σ={eff_std:.1f})")
+                    print("-" * 65)
                     print(f"{'BUCKET':<10} | {'BID':<6} | {'ASK':<6} | {'FAIR':<6} | {'Z-SCR':<6} | {'ACTION'}")
 
                     my_buckets = trader.get_owned_buckets_val(m_poly['title'])
 
                     for b in m_clob['buckets']:
+                        # Solo filtramos los buckets que YA HAN PASADO matemáticamente
                         if b['max'] < m_poly['count']: continue 
                         
                         bid, ask = b.get('bid',0), b.get('ask',0)
                         mid = (b['min'] + b['max']) / 2
                         
-                        # Z-SCORE (V11)
+                        # Math
                         z_score = abs(mid - final_mean) / eff_std
                         p_min = norm.cdf(b['min'], final_mean, eff_std)
                         p_max = norm.cdf(b['max']+1, final_mean, eff_std)
@@ -579,31 +589,26 @@ def run():
                         action = "-"
                         reason = ""
                         
-                        # --- DECISIÓN V11 INYECTADA ---
+                        # --- MOTOR ---
                         owned = any([x for x in trader.portfolio['positions'].values() 
                                      if x['bucket'] == b['bucket'] and titles_match_paranoid(x['market'], m_poly['title'])])
                         
-                        # A. VENTA (Rotación o Profit)
                         if owned:
-                            # 1. Recuperar posición para saber ganancia
                             pos_data = next((v for k,v in trader.portfolio['positions'].items() if v['bucket'] == b['bucket']), None)
                             if pos_data:
                                 entry = pos_data['entry_price']
                                 profit_pct = (bid - entry) / entry if entry > 0 else 0
                                 
-                                # 2. Regla ROTATE (Stop Loss Inteligente)
                                 if z_score > 2.0:
                                     action = "ROTATE"; reason = f"Z-Score {z_score:.1f}"
                                     res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
                                     if res: save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score})
                                 
-                                # 3. Regla TAKE PROFIT
                                 elif profit_pct > 0.30 and z_score > 1.8:
                                     action = "TAKE_PROFIT"; reason = f"Profit +{profit_pct*100:.0f}%"
                                     res = trader.execute(m_poly['title'], b['bucket'], "TAKE_PROFIT", bid, reason)
                                     if res: save_trade_snapshot("PROFIT", m_poly['title'], b['bucket'], bid, reason, {"profit": profit_pct})
 
-                        # B. COMPRA (Sniper)
                         elif not owned and not IS_WARMUP:
                             if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
                                 is_neighbor = True
@@ -615,12 +620,14 @@ def run():
                                     res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
                                     if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
 
-                        if action != "-" or (owned or fair > 0.10):
-                            color_act = f"🟢 {action}" if "BUY" in action else (f"🔴 {action}" if "ROTATE" in action or "PROFIT" in action else "-")
-                            print(f"{b['bucket']:<10} | {bid:.3f}  | {ask:.3f}  | {fair:.3f}  | {z_score:.1f}   | {color_act} {reason}")
+                        # PRINT INCONDICIONAL (SIN FILTROS)
+                        color_act = f"🟢 {action}" if "BUY" in action else (f"🔴 {action}" if "ROTATE" in action or "PROFIT" in action else "-")
+                        # Colorear buckets propios en azul visualmente
+                        bucket_display = f"*{b['bucket']}" if owned else f"{b['bucket']}"
+                        print(f"{bucket_display:<10} | {bid:.3f}  | {ask:.3f}  | {fair:.3f}  | {z_score:.1f}   | {color_act} {reason}")
 
             trader.print_summary(clob_data)
-            time.sleep(3) 
+            time.sleep(15) 
 
         except KeyboardInterrupt: break
         except Exception as e: 
