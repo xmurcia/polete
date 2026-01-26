@@ -175,7 +175,7 @@ class PolymarketSensor:
             if r.status_code != 200: return []
             
             trackings = r.json().get('data', {}).get('trackings', [])
-            print(json.dumps({'info': f"Found {len(trackings)} trackings."}))
+           
             res = []
             now = datetime.now(timezone.utc)
             
