@@ -358,7 +358,7 @@ def run():
             print(f"📂 Historial cargado: {len(last_tweets)} tweets.")
         except: pass
 
-    REFRESH_RATE = 3 # Si ves bloqueos, súbelo a 10
+    REFRESH_RATE = 15 # Si ves bloqueos, súbelo a 10
     last_known_counts = {}
 
     while True:
