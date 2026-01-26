@@ -282,6 +282,7 @@ class PolymarketSensor:
                 except: pass
 
             count = d.get('stats', {}).get('total', 0)
+            print(count)
             days_elapsed = d.get('stats', {}).get('daysElapsed', 0)
             daily_avg = 0.0
             if days_elapsed > 0: daily_avg = count / days_elapsed
@@ -460,8 +461,11 @@ class MarketPanicSensor:
 # ==========================================
 # 6. DIRECTOR (V12.2 - FULL VISIBILITY)
 # ==========================================
+# ==========================================
+# 6. DIRECTOR (V12.6 - FINAL MATH FIX)
+# ==========================================
 def run():
-    print("\n🤖 ELON-BOT V12.2 (FULL VISIBILITY MODE)")
+    print("\n🤖 ELON-BOT V12.6 (MATH FIX: INFINITY BUCKETS)")
     
     # Utiles V10
     def log_monitor(msg):
@@ -584,14 +588,25 @@ def run():
                         if b['max'] < m_poly['count']: continue 
                         
                         bid, ask = b.get('bid',0), b.get('ask',0)
-                        mid = (b['min'] + b['max']) / 2
+                        
+                        # --- FIX MATEMÁTICO (Z-SCORE INFINITO) ---
+                        # Si es un bucket final (ej: 740+), el máximo es 99999.
+                        # Asumimos un ancho estándar de 20 para calcular el punto medio real.
+                        if b['max'] >= 99999:
+                            mid = b['min'] + 20
+                        else:
+                            mid = (b['min'] + b['max']) / 2
                         
                         # Math
                         z_score = abs(mid - final_mean) / eff_std
                         p_min = norm.cdf(b['min'], final_mean, eff_std)
-                        p_max = norm.cdf(b['max']+1, final_mean, eff_std)
-                        fair = p_max - p_min
-                        if "+" in b['bucket']: fair = 1.0 - p_min
+                        
+                        # Cálculo de probabilidad (Fair Value)
+                        if b['max'] >= 99999:
+                             fair = 1.0 - p_min
+                        else:
+                             p_max = norm.cdf(b['max']+1, final_mean, eff_std)
+                             fair = p_max - p_min
 
                         action = "-"
                         reason = ""
