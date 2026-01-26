@@ -10,7 +10,7 @@ import dateutil.parser
 from scipy.stats import norm
 
 # ==============================================================================
-# CONFIGURACIÓN MAESTRA V11.4 (ANTI-BLOCK + ROBUST)
+# CONFIGURACIÓN (V11.7 - BACK TO BASICS)
 # ==============================================================================
 LOGS_DIR = 'logs'
 if not os.path.exists(LOGS_DIR): os.makedirs(LOGS_DIR)
@@ -23,22 +23,14 @@ FILES = {
     'market_tape': os.path.join(LOGS_DIR, "market_tape_merged.json")
 }
 
-# CONFIGURACIÓN DE RED (CABECERAS REALES PARA EVITAR BLOQUEOS)
 API_CONFIG = {
     'base_url': "https://xtracker.polymarket.com/api",
     'gamma_url': "https://gamma-api.polymarket.com/events",
     'clob_url': "https://clob.polymarket.com/prices",
-    'user': "elonmusk",
-    'headers': {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://polymarket.com/",
-        "Origin": "https://polymarket.com"
-    }
+    'user': "elonmusk"
 }
 
-# --- PARÁMETROS DE ESTRATEGIA ---
+# PARAMETROS ESTRATEGIA
 MAX_Z_SCORE_ENTRY = 1.6
 MIN_PRICE_ENTRY = 0.02
 ENABLE_CLUSTERING = True
@@ -46,10 +38,9 @@ CLUSTER_RANGE = 40
 MARKET_WEIGHT = 0.30
 
 # ==============================================================================
-# 🛠️ UTILIDADES DE SISTEMA
+# 🛠️ UTILIDADES
 # ==============================================================================
 def append_to_json_file(filename, new_record):
-    """Escritura atómica segura"""
     data_list = []
     if os.path.exists(filename):
         try:
@@ -59,22 +50,17 @@ def append_to_json_file(filename, new_record):
                     data_list = json.loads(content)
                     if not isinstance(data_list, list): data_list = [data_list]
         except: pass
-    
     data_list.append(new_record)
-    temp_file = filename + ".tmp"
+    temp = filename + ".tmp"
     try:
-        with open(temp_file, 'w') as f:
-            json.dump(data_list, f, indent=2)
-        os.replace(temp_file, filename)
-    except Exception as e:
-        print(f"❌ Error IO {filename}: {e}")
+        with open(temp, 'w') as f: json.dump(data_list, f, indent=2)
+        os.replace(temp, filename)
+    except Exception: pass
 
 def titles_match_paranoid(tracker_title, market_title):
-    """Comparación estricta de títulos"""
     t1 = tracker_title.lower(); t2 = market_title.lower()
     if t1 in t2 or t2 in t1: return True
-    def get_nums(txt):
-        return {n for n in re.findall(r'\d+', txt) if n not in ['2024', '2025', '2026']}
+    def get_nums(txt): return {n for n in re.findall(r'\d+', txt) if n not in ['2024', '2025', '2026']}
     return len(get_nums(t1).intersection(get_nums(t2))) >= 2
 
 # ==============================================================================
@@ -127,50 +113,78 @@ class HawkesBrain:
         return np.mean(sims), np.std(sims)
 
 # ==============================================================================
-# 📡 SENSOR POLYMARKET (ROBUST REQUESTS)
+# 📡 SENSOR V10 ORIGINAL (EL QUE FUNCIONABA)
 # ==============================================================================
 class PolymarketSensor:
     def __init__(self):
         self.s = requests.Session()
-        self.s.headers.update(API_CONFIG['headers'])
+        # Header simple V10
+        self.s.headers.update({"User-Agent": "Mozilla/5.0"})
+
+    def _fetch_tracking_detail(self, t, now):
+        try:
+            # 1. Petición segura a la API
+            url = f"{API_CONFIG['base_url']}/trackings/{t['id']}?includeStats=true"
+            # Timeout simple de 5s como en V10
+            response = self.s.get(url, timeout=5).json()
+            d = response.get('data', {})
+            
+            end_date_str = d.get('endDate') or t.get('endDate')
+            hours = 0.0
+
+            if end_date_str:
+                try:
+                    # A. Parseamos la fecha original
+                    original_dt = dateutil.parser.isoparse(end_date_str)
+                    
+                    # B. 🔨 MARTILLAZO HORARIO: FORZAMOS LAS 17:00 UTC
+                    fixed_end_date = original_dt.replace(
+                        hour=17, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
+                    )
+                    
+                    # C. Calculamos las horas restantes
+                    hours = (fixed_end_date - now).total_seconds() / 3600.0
+                    
+                except Exception:
+                    pass
+
+            # 2. Obtención del Conteo
+            count = d.get('stats', {}).get('total', 0)
+            days_elapsed = d.get('stats', {}).get('daysElapsed', 0)
+
+            # 3. FILTRO DE VISIBILIDAD GENÉRICO
+            if hours > -2.0:
+                return {
+                    'id': t['id'], 
+                    'title': t['title'], 
+                    'count': count, 
+                    'hours': hours,
+                    'daily_avg': days_elapsed > 0 and count/days_elapsed or 0,
+                    'active': True 
+                }
+
+        except Exception:
+            pass
+        return None 
 
     def get_active_counts(self):
         url = f"{API_CONFIG['base_url']}/users/{API_CONFIG['user']}"
         try:
-            r = self.s.get(url, timeout=15)
+            r = self.s.get(url, timeout=5)
+            # Si falla, devolvemos vacio sin bloquear ni imprimir errores raros
+            if r.status_code != 200: return []
             
-            # CONTROL DE ERRORES HTTP
-            if r.status_code != 200:
-                print(f"⚠️ API Status {r.status_code}: Posible bloqueo o caída.")
-                return []
-                
             trackings = r.json().get('data', {}).get('trackings', [])
             res = []
             now = datetime.now(timezone.utc)
             
-            def process_tracking(t):
-                if not t.get('startDate') or not t.get('endDate'): return None
-                try:
-                    end = dateutil.parser.isoparse(t['endDate'])
-                    if now.timestamp() > (end.timestamp() + 43200): return None 
-                    
-                    # Llamada Detalle
-                    det = self.s.get(f"{API_CONFIG['base_url']}/trackings/{t['id']}?includeStats=true", timeout=10).json()
-                    count = det.get('data', {}).get('stats', {}).get('total', 0)
-                    
-                    fixed_end = end.replace(hour=17, minute=0, second=0, tzinfo=timezone.utc)
-                    hours = (fixed_end - now).total_seconds() / 3600.0
-                    
-                    return {'id': t['id'], 'title': t['title'], 'count': count, 'hours': hours}
-                except: return None
-
-            with ThreadPoolExecutor(max_workers=3) as ex: # Menos workers para evitar rate limit
-                futures = [ex.submit(process_tracking, t) for t in trackings]
+            # Usamos ThreadPool como en V10
+            with ThreadPoolExecutor(max_workers=5) as ex:
+                futures = [ex.submit(self._fetch_tracking_detail, t, now) for t in trackings]
                 for f in as_completed(futures):
                     if f.result(): res.append(f.result())
             return res
-        except Exception as e:
-            # Silenciamos el error para no ensuciar el log, pero retornamos vacío para reintentar
+        except Exception:
             return []
 
 # ==============================================================================
@@ -179,12 +193,12 @@ class PolymarketSensor:
 class ClobMarketScanner:
     def __init__(self):
         self.s = requests.Session()
-        self.s.headers.update(API_CONFIG['headers'])
+        self.s.headers.update({"User-Agent": "Mozilla/5.0"})
 
     def get_market_prices(self):
         try:
             params = {"limit": 100, "active": "true", "closed": "false", "archived": "false", "order": "volume24hr", "ascending": "false"}
-            r = self.s.get(API_CONFIG['gamma_url'], params=params, timeout=10)
+            r = self.s.get(API_CONFIG['gamma_url'], params=params, timeout=5)
             if r.status_code != 200: return []
             data = r.json()
             
@@ -209,7 +223,7 @@ class ClobMarketScanner:
 
             price_map = {}
             if tokens:
-                bulk = self.s.post(API_CONFIG['clob_url'], json=tokens, timeout=10).json()
+                bulk = self.s.post(API_CONFIG['clob_url'], json=tokens, timeout=5).json()
                 for tid, p in bulk.items():
                     price_map[tid] = {'bid': float(p.get('BUY', 0) or 0), 'ask': float(p.get('SELL', 0) or 0)}
 
@@ -221,8 +235,7 @@ class ClobMarketScanner:
                     clean_b.append({**b, **p})
                 final.append({'title': s['title'], 'buckets': clean_b})
             return final
-        except Exception as e:
-            return []
+        except Exception: return []
 
 # ==============================================================================
 # 💼 PAPER TRADER
@@ -327,7 +340,7 @@ class PaperTrader:
 # 🚀 EJECUCIÓN PRINCIPAL
 # ==============================================================================
 def run():
-    print("🤖 ELON BOT V11.4 [HYBRID + ROBUST NET]")
+    print("🤖 ELON BOT V11.7 [V10 SENSOR + V11 BRAIN]")
     
     brain = HawkesBrain()
     sensor = PolymarketSensor()
@@ -345,7 +358,7 @@ def run():
             print(f"📂 Historial cargado: {len(last_tweets)} tweets.")
         except: pass
 
-    REFRESH_RATE = 3
+    REFRESH_RATE = 3 # Si ves bloqueos, súbelo a 10
     last_known_counts = {}
 
     while True:
@@ -357,7 +370,7 @@ def run():
             clob_data = pricer.get_market_prices()
             
             if not markets_xtracker:
-                print(f"💤 Sin respuesta API (Reintentando)...", end="\r")
+                print(f"💤 Esperando datos API...", end="\r")
                 time.sleep(REFRESH_RATE)
                 continue
 
@@ -462,8 +475,7 @@ def run():
             time.sleep(sleep_time)
 
         except KeyboardInterrupt: break
-        except Exception as e:
-            # print(f"🔥 Error Main: {e}") 
+        except Exception:
             time.sleep(5)
 
 if __name__ == "__main__":

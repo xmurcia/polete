@@ -1,132 +1,429 @@
 import time
 import json
 import os
+import glob
 import requests
 import numpy as np
+import pandas as pd
 import re
 from datetime import datetime, timezone
+from scipy.optimize import minimize
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import dateutil.parser
-from scipy.stats import norm
+from collections import deque
+from scipy.stats import norm # Necesario para la Campana de Gauss
 
-# ==============================================================================
-# CONFIGURACIÓN (V11.7 - BACK TO BASICS)
-# ==============================================================================
+# ==========================================
+# CONFIGURACIÓN
+# ==========================================
+DAILY_METRICS_THREE_WEEKS_DIR = "daily_metrics_three_weeks"
 LOGS_DIR = 'logs'
-if not os.path.exists(LOGS_DIR): os.makedirs(LOGS_DIR)
 
-FILES = {
-    'portfolio': os.path.join(LOGS_DIR, "portfolio.json"),
-    'history': os.path.join(LOGS_DIR, "live_history.json"),
-    'trades': os.path.join(LOGS_DIR, "trade_history.csv"),
-    'snapshots': os.path.join(LOGS_DIR, "snapshots_merged.json"),
-    'market_tape': os.path.join(LOGS_DIR, "market_tape_merged.json")
+PORTFOLIO_PAPER_TRADER = "portfolio.json"
+LIVE_LOG = "live_history.json"
+TRADE_LOG = "trade_history.csv"
+MONITOR_LOG = "bot_monitor.log"      # <--- NUEVO: Diario del Capitán Automático
+SNAPSHOTS_DIR = os.path.join(LOGS_DIR, "snapshots") # <--- NUEVO: Fotos Forenses
+MARKET_TAPE_DIR = os.path.join(LOGS_DIR, "market_tape") # <--- NUEVO: Grabación continua
+
+# Aseguramos que existan los directorios
+if not os.path.exists(DAILY_METRICS_THREE_WEEKS_DIR): os.makedirs(DAILY_METRICS_THREE_WEEKS_DIR)
+if not os.path.exists(SNAPSHOTS_DIR): os.makedirs(SNAPSHOTS_DIR)
+if not os.path.exists(MARKET_TAPE_DIR): os.makedirs(MARKET_TAPE_DIR)
+
+# Bio-Ritmos
+HOURLY_MULTIPLIERS = {
+    0: 0.97,  1: 0.80,  2: 0.42,  3: 0.20,  
+    4: 0.39,  5: 0.48,  6: 2.11,  7: 1.41, 
+    8: 1.46,  9: 1.58, 10: 0.44, 11: 0.21, 
+    12: 0.35, 13: 0.49, 14: 1.72, 15: 1.71, 
+    16: 1.37, 17: 2.03, 18: 1.34, 19: 1.24, 
+    20: 1.01, 21: 0.89, 22: 0.82, 23: 0.61  
+}
+DAILY_MULTIPLIERS = {
+    0: 0.90, 1: 0.75, 2: 1.25, 3: 0.95, 4: 0.95, 5: 1.15, 6: 1.10
 }
 
 API_CONFIG = {
     'base_url': "https://xtracker.polymarket.com/api",
     'gamma_url': "https://gamma-api.polymarket.com/events",
-    'clob_url': "https://clob.polymarket.com/prices",
+    'clob_url': "https://clob.polymarket.com/price",
     'user': "elonmusk"
 }
 
-# PARAMETROS ESTRATEGIA
-MAX_Z_SCORE_ENTRY = 1.6
-MIN_PRICE_ENTRY = 0.02
-ENABLE_CLUSTERING = True
-CLUSTER_RANGE = 40
-MARKET_WEIGHT = 0.30
+def is_market_tradable(market_json):
+    """
+    Filtro Maestro V10.1: STRICT MODE.
+    """
+    # 1. Si está cerrado definitivamente (Settled), basura.
+    if market_json.get('closed') is True:
+        return False
 
-# ==============================================================================
-# 🛠️ UTILIDADES
-# ==============================================================================
-def append_to_json_file(filename, new_record):
-    data_list = []
-    if os.path.exists(filename):
+    # 2. Filtro de Fecha (El Juez Supremo)
+    end_date_str = market_json.get('endDate') # "2026-01-20T17:00:00Z"
+    if end_date_str:
         try:
-            with open(filename, 'r') as f:
-                content = f.read().strip()
-                if content:
-                    data_list = json.loads(content)
-                    if not isinstance(data_list, list): data_list = [data_list]
-        except: pass
-    data_list.append(new_record)
-    temp = filename + ".tmp"
-    try:
-        with open(temp, 'w') as f: json.dump(data_list, f, indent=2)
-        os.replace(temp, filename)
-    except Exception: pass
+            # Convertimos a objeto fecha consciente de zona horaria
+            dt_end = datetime.strptime(end_date_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            
+            # --- FIX CRÍTICO: MARGEN CERO ---
+            # Si la fecha ya pasó (aunque sea por 1 segundo), FUERA.
+            # Eliminamos el margen de 2 horas para evitar ver mercados zombies.
+            if datetime.now(timezone.utc).timestamp() > dt_end.timestamp():
+                return False
+        except:
+            pass # Si falla la fecha, ante la duda lo dejamos pasar (Fail Open)
 
-def titles_match_paranoid(tracker_title, market_title):
-    t1 = tracker_title.lower(); t2 = market_title.lower()
-    if t1 in t2 or t2 in t1: return True
-    def get_nums(txt): return {n for n in re.findall(r'\d+', txt) if n not in ['2024', '2025', '2026']}
-    return len(get_nums(t1).intersection(get_nums(t2))) >= 2
+    # 3. NOTA: NO filtramos 'acceptingOrders'. 
+    return True
 
-# ==============================================================================
-# 🧠 CEREBRO V11
-# ==============================================================================
+# --- Ejemplo de uso con tu lista de mercados ---
+# active_markets = [m for m in all_markets if is_market_tradable(m)]
+
+
+# ==========================================
+# 1. SCANNER DE PRECIOS (OPTIMIZADO V9 - BULK REQUEST)
+# ==========================================
+class ClobMarketScanner:
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Referer": "https://polymarket.com/"
+        })
+        # Endpoint para precios en lote (mucho más rápido que hilos)
+        self.bulk_prices_url = "https://clob.polymarket.com/prices"
+
+    def get_market_prices(self):
+        print("   🔎 Escaneando Order Book (Modo Bulk V9)...", end=" ")
+        t_start = time.time()
+        
+        try:
+            # --- 🛑 CORRECCIÓN CRÍTICA DE PARÁMETROS ---
+            # Quitamos 'active' y 'closed' para que la API no oculte eventos en settlement.
+            # Traemos TODO lo que tenga volumen.
+            params = {
+                "limit": 100, 
+                "active": "true", 
+                "closed": "false",
+                "archived": "false", 
+                "order": "volume24hr", 
+                "ascending": "false"
+            }
+            resp = self.session.get(API_CONFIG['gamma_url'], params=params, timeout=5)
+            data = resp.json()
+            
+            market_structure = []
+            tokens_to_fetch = [] # Lista para la petición masiva (Bulk)
+
+            # Fecha actual para calculos internos si hicieran falta
+            now_utc = datetime.now(timezone.utc)
+            
+            for event in data:
+                title = event.get('title', '').lower()
+
+                # Filtro básico por nombre
+                if "elon" not in title or "tweets" not in title: continue
+                if not event.get('markets'): continue
+                
+                buckets_list = []
+                for m in event['markets']:
+                    
+                    # --- 🛡️ FILTRO MAESTRO ---
+                    # Delegamos la decisión a la función lógica.
+                    # Esto permite pasar eventos "zombies" pero visibles.
+                    if not is_market_tradable(m):
+                        continue
+                    # -------------------------
+                           
+                    q = m.get('question', '')
+                    r_match = re.search(r'(\d+)-(\d+)', q)
+                    o_match = re.search(r'(\d+)\+', q)
+                    
+                    min_v, max_v, b_name = 0, 99999, "Unknown"
+                    if r_match:
+                        min_v, max_v = int(r_match.group(1)), int(r_match.group(2))
+                        b_name = f"{min_v}-{max_v}"
+                    elif o_match:
+                        min_v = int(o_match.group(1))
+                        b_name = f"{min_v}+"
+                    else: continue
+
+                    try:
+                        t_ids = json.loads(m['clobTokenIds'])
+                        yes_token = t_ids[0]
+                        buckets_list.append({
+                            'bucket': b_name, 'min': min_v, 'max': max_v, 'token': yes_token
+                        })
+                        
+                        # --- PREPARACIÓN BULK ---
+                        # En lugar de crear tareas, añadimos a la lista de petición
+                        tokens_to_fetch.append({"token_id": yes_token, "side": "BUY"})  # Bid
+                        tokens_to_fetch.append({"token_id": yes_token, "side": "SELL"}) # Ask
+                        
+                    except: continue
+                
+                if buckets_list:
+                    buckets_list.sort(key=lambda x: x['min'])
+                    market_structure.append({'title': event['title'], 'buckets': buckets_list})
+
+            # --- EJECUCIÓN BULK (SÚPER RÁPIDA) ---
+            price_map = {} 
+            if tokens_to_fetch:
+                try:
+                    # Una sola llamada HTTP para todos los precios
+                    bulk_resp = self.session.post(
+                        self.bulk_prices_url, 
+                        json=tokens_to_fetch, 
+                        timeout=5
+                    )
+                    bulk_data = bulk_resp.json()
+                    
+                    # Mapeamos la respuesta al formato que usa tu bot
+                    # La API devuelve: { "token_id": { "BUY": "0.45", "SELL": "0.46" } }
+                    for token_id, prices in bulk_data.items():
+                        price_map[token_id] = {
+                            "buy": float(prices.get("BUY", 0) or 0),   # Bid
+                            "sell": float(prices.get("SELL", 0) or 0)  # Ask
+                        }
+                except Exception as e:
+                    print(f"⚠️ Fallo en Bulk Request: {e}")
+
+            # Construcción de datos finales (Igual que antes)
+            final_data = []
+            for mkt in market_structure:
+                clean_buckets = []
+                for b in mkt['buckets']:
+                    precios = price_map.get(b['token'], {})
+                    clean_buckets.append({
+                        'bucket': b['bucket'],
+                        'min': b['min'],
+                        'max': b['max'],
+                        'ask': precios.get('sell', 0.0),
+                        'bid': precios.get('buy', 0.0)
+                    })
+                final_data.append({'title': mkt['title'], 'buckets': clean_buckets})
+
+            elapsed = time.time() - t_start
+            print(f"✅ ({elapsed:.2f}s)")
+            return final_data
+        except Exception as e:
+            print(f"❌ Error Scanner: {e}")
+            return []
+
+# ==========================================
+# 2. CEREBRO MATEMÁTICO (HAWKES - CONFIG NATURAL)
+# ==========================================
 class HawkesBrain:
     def __init__(self):
+        # Parámetros iniciales por defecto (se optimizarán solos)
         self.params = {'mu': 0.4, 'alpha': 3.0, 'beta': 4.0} 
+        self.timestamps = [] 
+        self.history_df = None # Para consultas de eventos
+        self._ensure_directories()
+        self.load_and_train()
 
-    def get_market_consensus(self, m_poly, clob_buckets):
-        sum_prod = 0; sum_w = 0
-        for b in clob_buckets:
+    def _ensure_directories(self):
+        if not os.path.exists(DAILY_METRICS_THREE_WEEKS_DIR): os.makedirs(DAILY_METRICS_THREE_WEEKS_DIR)
+
+    def load_and_train(self):
+        print("🧠 Cargando y limpiando datos (Modo NATURAL: Sin frenos ni adrenalina)...")
+        
+        all_timestamps = []
+        csv_files = glob.glob(os.path.join(DAILY_METRICS_THREE_WEEKS_DIR, "*.csv"))
+        df_list = []
+        
+        print(f"   - Procesando {len(csv_files)} archivos CSV...")
+        
+        for f in csv_files:
+            nombre = os.path.basename(f)
+            # Evitamos leer archivos generados por nosotros
+            if "dataset" in nombre or "trade" in nombre or "portfolio" in nombre: continue
+
             try:
-                if "+" in b['bucket']: mid = int(re.search(r'\d+', b['bucket']).group()) + 20
-                else:
-                    nums = [int(n) for n in re.findall(r'\d+', b['bucket'])]
-                    if len(nums) == 2: mid = sum(nums) / 2
-                    else: continue
-                price = (b['bid'] + b['ask']) / 2
-                if price > 0.01:
-                    sum_prod += mid * price; sum_w += price
-            except: continue
-        return (sum_prod / sum_w) if sum_w > 0 else None
+                # 1. Leer CSV
+                df_temp = pd.read_csv(f)
+                df_temp.columns = [c.strip() for c in df_temp.columns] # Limpiar nombres col
+                
+                if 'Date/Time' in df_temp.columns:
+                    # 2. Conversión de fecha BLINDADA (ISO + Texto)
+                    df_temp['Date_Clean'] = pd.to_datetime(df_temp['Date/Time'], errors='coerce')
+                    
+                    # Si falló la conversión rápida, intentamos la lenta (para "Dec 9")
+                    if df_temp['Date_Clean'].isna().any():
+                        def parsear_fecha(x):
+                            try: return dateutil.parser.parse(str(x))
+                            except: return pd.NaT
+                        mask_nulos = df_temp['Date_Clean'].isna()
+                        df_temp.loc[mask_nulos, 'Date_Clean'] = df_temp.loc[mask_nulos, 'Date/Time'].apply(parsear_fecha)
 
-    def predict(self, history_ts, hours_left):
+                    df_temp['Date/Time'] = df_temp['Date_Clean']
+                    df_temp = df_temp.dropna(subset=['Date/Time'])
+                    
+                    if not df_temp.empty:
+                        df_list.append(df_temp)
+                
+            except Exception as e: 
+                pass # Ignoramos archivos corruptos silenciosamente para no ensuciar el log
+
+        # 3. FUSIONAR Y LIMPIAR
+        if df_list:
+            full_df = pd.concat(df_list, ignore_index=True)
+            
+            # --- LA CLAVE DEL ÉXITO: ELIMINAR DUPLICADOS ---
+            # Esto evita que el modelo vea 110 tweets/día cuando solo hubo 55.
+            clean_df = full_df.drop_duplicates(subset='Date/Time', keep='first')
+            
+            # Guardamos copia para consultas del portfolio
+            self.history_df = clean_df.copy()
+            self.history_df.set_index('Date/Time', inplace=True)
+            
+            print(f"   - Datos Históricos: {len(clean_df)} horas únicas recuperadas.")
+
+            np.random.seed(42)
+            
+            # 4. GENERAR TIMESTAMPS (SIN FILTROS)
+            for _, row in clean_df.iterrows():
+                posts_real = int(row['Posts'])
+                fecha = row['Date/Time']
+                
+                # --- AQUÍ ESTABA EL FRENO, YA NO ESTÁ ---
+                # Usamos los datos crudos. Si Elon hizo 70 tweets, usamos 70.
+                posts_count = posts_real 
+                # ----------------------------------------
+
+                if posts_count > 0:
+                    ts = fecha.timestamp()
+                    # Distribuir aleatoriamente dentro de la hora
+                    all_timestamps.extend(ts + np.random.uniform(0, 3600, posts_count))
+        
+        # 5. CARGAR LIVE DATA
+        live_path = os.path.join(LOGS_DIR, LIVE_LOG)
+        if os.path.exists(live_path):
+            try:
+                with open(live_path, 'r') as f:
+                    live_events = json.load(f)
+                    # Filtramos eventos de las últimas 24h
+                    now_ms = time.time() * 1000
+                    live_events = [e for e in live_events if (now_ms - e['timestamp']) < 86400000]
+                    all_timestamps.extend([e['timestamp']/1000.0 for e in live_events])
+            except: pass
+
+        # 6. ENTRENAR
+        if all_timestamps:
+            self.timestamps = np.array(sorted(all_timestamps))
+            print(f"✅ Entrenando con {len(self.timestamps)} eventos totales.")
+            self._optimize_params()
+        else:
+            print("⚠️ No hay datos suficientes para entrenar.")
+
+    def _optimize_params(self):
+        if len(self.timestamps) < 50: return
+        print("💪 Optimizando parámetros (Matemática Pura)...")
+        
+        # Normalizamos tiempos para que el algoritmo converja mejor
+        ts_h = (self.timestamps - self.timestamps[0]) / 3600.0
+        T_max = ts_h[-1]
+        
+        def nll(p):
+            mu, a, b = p
+            # Restricciones de estabilidad básicas
+            if mu <= 0.001 or a <= 0.001 or b <= 0.001: return 1e10
+            if a >= b: return 1e10 # Evita explosiones infinitas
+            
+            n = len(ts_h)
+            log_mu = -np.log(mu)
+            
+            term_sum = 0
+            integral = mu * T_max
+            A_prev = 0
+            
+            term_sum += np.log(mu)
+            
+            # Bucle optimizado de Log-Likelihood
+            for i in range(1, n):
+                dt = ts_h[i] - ts_h[i-1]
+                A_curr = np.exp(-b * dt) * (A_prev + 1)
+                lam = mu + a * A_curr
+                term_sum += np.log(lam)
+                A_prev = A_curr
+            
+            term_integral_exc = np.sum((a/b) * (1 - np.exp(-b * (T_max - ts_h))))
+            return -(term_sum - (integral + term_integral_exc))
+
+        try:
+            # Optimizamos sin forzar nada manualmente
+            res = minimize(nll, [self.params['mu'], self.params['alpha'], self.params['beta']], 
+                           method='L-BFGS-B', bounds=[(1e-4, None)]*3)
+            
+            if res.success: 
+                self.params = dict(zip(['mu','alpha','beta'], res.x))
+                print(f"✨ Params optimizados: {self.params}")
+                # Resultado esperado: Mu ~0.4, Beta ~4.0 -> Media ~55 tweets/día
+            else:
+                print("⚠️ Optimización no convergió, usando anteriores.")
+        except Exception as e:
+            print(f"⚠️ Error optimizando: {e}")
+
+    def predict(self, history_ms, hours):
+        # Simulación de Monte Carlo estándar
         mu, a, b = self.params.values()
         boost = 0
-        if history_ts:
-            last_ts = history_ts[-1]; now = time.time()
-            cutoff = 10.0 / b
-            for t_ts in reversed(history_ts):
-                age_sec = now - t_ts
-                if age_sec > cutoff * 3600: break
-                if age_sec < 0: age_sec = 0
-                boost += a * np.exp(-b * (age_sec / 3600.0))
+        
+        # Calculamos la excitación actual basada en los tweets recientes (Live)
+        if history_ms:
+            # Usamos el último timestamp conocido como referencia t0 local
+            last_ts_sec = history_ms[-1] / 1000.0
+            
+            # Recorremos hacia atrás para sumar excitación
+            # Solo importan los eventos recientes (ej: últimas 4 horas)
+            cutoff = 10.0 / b # Más allá de esto la exponencial es 0
+            
+            # Convertimos history_ms a segundos relativos al 'ahora' virtual
+            # Nota: Esta es una aproximación rápida para el boost
+            current_time_sec = time.time()
+            
+            for t_ms in reversed(history_ms):
+                t_sec = t_ms / 1000.0
+                dt = current_time_sec - t_sec
+                if dt > cutoff * 3600: break # Demasiado viejo
+                if dt < 0: dt = 0
+                
+                # Sumamos la excitación remanente
+                boost += a * np.exp(-b * (dt / 3600.0))
         
         sims = []
-        for _ in range(500):
+        # Realizamos 1000 futuros posibles
+        for _ in range(1000):
             t, l_boost, ev = 0, boost, 0
-            while t < hours_left:
+            while t < hours:
                 l_max = mu + l_boost
                 if l_max <= 0: l_max = 0.001
+                
                 w = -np.log(np.random.uniform()) / l_max
                 t += w
-                if t >= hours_left: break
+                if t >= hours: break
+                
                 l_boost *= np.exp(-b * w)
+                
                 if np.random.uniform() < (mu + l_boost)/l_max:
                     ev += 1; l_boost += a
             sims.append(ev)
-        return np.mean(sims), np.std(sims)
+        return sims
 
-# ==============================================================================
-# 📡 SENSOR V10 ORIGINAL (EL QUE FUNCIONABA)
-# ==============================================================================
+# ==========================================
+# 3. SENSOR DE TWEETS (OPTIMIZADO)
+# ==========================================
 class PolymarketSensor:
     def __init__(self):
         self.s = requests.Session()
-        # Header simple V10
         self.s.headers.update({"User-Agent": "Mozilla/5.0"})
 
     def _fetch_tracking_detail(self, t, now):
         try:
             # 1. Petición segura a la API
-            url = f"{API_CONFIG['base_url']}/trackings/{t['id']}?includeStats=true"
-            # Timeout simple de 5s como en V10
-            response = self.s.get(url, timeout=5).json()
+            response = self.s.get(f"{API_CONFIG['base_url']}/trackings/{t['id']}?includeStats=true", timeout=5).json()
             d = response.get('data', {})
             
             end_date_str = d.get('endDate') or t.get('endDate')
@@ -134,18 +431,20 @@ class PolymarketSensor:
 
             if end_date_str:
                 try:
-                    # A. Parseamos la fecha original
+                    # A. Parseamos la fecha original (que viene mal, ej: 05:00:59Z)
                     original_dt = dateutil.parser.isoparse(end_date_str)
                     
-                    # B. 🔨 MARTILLAZO HORARIO: FORZAMOS LAS 17:00 UTC
+                    # B. 🔨 MARTILLAZO HORARIO: FORZAMOS LAS 17:00 UTC (18:00 ESPAÑA)
+                    # Mantenemos Año, Mes y Día originales, pero reescribimos la hora.
                     fixed_end_date = original_dt.replace(
                         hour=17, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
                     )
                     
-                    # C. Calculamos las horas restantes
+                    # C. Calculamos las horas restantes usando la FECHA CORREGIDA
                     hours = (fixed_end_date - now).total_seconds() / 3600.0
                     
-                except Exception:
+                except Exception as e:
+                    # Si falla el parseo, hours se queda en 0.0
                     pass
 
             # 2. Obtención del Conteo
@@ -153,330 +452,926 @@ class PolymarketSensor:
             days_elapsed = d.get('stats', {}).get('daysElapsed', 0)
 
             # 3. FILTRO DE VISIBILIDAD GENÉRICO
+            # Si le quedan horas (o acaba de terminar hace menos de 2h), lo mostramos.
             if hours > -2.0:
                 return {
                     'id': t['id'], 
                     'title': t['title'], 
                     'count': count, 
-                    'hours': hours,
-                    'daily_avg': days_elapsed > 0 and count/days_elapsed or 0,
+                    'hours': hours, # Esta hora ahora es CORRECTA (hasta las 18:00)
+                    'daily_avg': days_elapsed  > 0 and count > 0 and (count / days_elapsed) or 0.0,
                     'active': True 
                 }
 
         except Exception:
             pass
-        return None 
+        
+        return None
 
     def get_active_counts(self):
-        url = f"{API_CONFIG['base_url']}/users/{API_CONFIG['user']}"
         try:
-            r = self.s.get(url, timeout=5)
-            # Si falla, devolvemos vacio sin bloquear ni imprimir errores raros
-            if r.status_code != 200: return []
-            
-            trackings = r.json().get('data', {}).get('trackings', [])
+            # Petición a la API de trackings
+            r = self.s.get(f"{API_CONFIG['base_url']}/users/{API_CONFIG['user']}", timeout=5).json()
+            trackings = r.get('data', {}).get('trackings', [])
+           
             res = []
             now = datetime.now(timezone.utc)
             
-            # Usamos ThreadPool como en V10
-            with ThreadPoolExecutor(max_workers=5) as ex:
-                futures = [ex.submit(self._fetch_tracking_detail, t, now) for t in trackings]
+            candidates = []
+            for t in trackings:
+                # --- 🧠 LÓGICA V9: DATE-FIRST ---
+                # Ignoramos si la API dice que está inactivo.
+                # Si la fecha actual está dentro del rango (con margen), LO QUEREMOS.
+                
+                start_str = t.get('startDate')
+                end_str = t.get('endDate')
+                
+                if start_str and end_str:
+                    try:
+                        # Parseamos fechas (soportando formato ISO con Z)
+                        start = dateutil.parser.isoparse(start_str)
+                        end = dateutil.parser.isoparse(end_str)
+                        
+                        # Margen de 12 horas extra tras el cierre para ver la resolución
+                        margin = pd.Timedelta(hours=12)
+                        
+                        # Si HOY es menor que (Fin + 12h), el evento es relevante
+                        if now <= (end + margin):
+                            candidates.append(t)
+                            continue # Ya lo tenemos, pasamos al siguiente
+                    except:
+                        pass # Si falla fecha, pasamos al fallback
+                
+                # Fallback: Si no pudimos leer fechas, usamos el flag isActive por defecto
+                if t.get('isActive'): 
+                    candidates.append(t)
+
+            # Procesamiento en paralelo para detalles (Count, Hours...)
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(self._fetch_tracking_detail, t, now): t for t in candidates}
                 for f in as_completed(futures):
-                    if f.result(): res.append(f.result())
+                    try:
+                        result = f.result()
+                        if result: res.append(result)
+                    except: pass
+
             return res
-        except Exception:
+        except Exception as e:
+            print(f"Error en get_active_counts: {e}")
             return []
 
-# ==============================================================================
-# 🔎 CLOB SCANNER
-# ==============================================================================
-class ClobMarketScanner:
-    def __init__(self):
-        self.s = requests.Session()
-        self.s.headers.update({"User-Agent": "Mozilla/5.0"})
-
-    def get_market_prices(self):
-        try:
-            params = {"limit": 100, "active": "true", "closed": "false", "archived": "false", "order": "volume24hr", "ascending": "false"}
-            r = self.s.get(API_CONFIG['gamma_url'], params=params, timeout=5)
-            if r.status_code != 200: return []
-            data = r.json()
-            
-            structure = []; tokens = []
-            for e in data:
-                if "elon" not in e.get('title','').lower() or "tweets" not in e.get('title','').lower(): continue
-                buckets = []
-                for m in e.get('markets', []):
-                    q = m.get('question', '')
-                    r_match = re.search(r'(\d+)-(\d+)', q); o_match = re.search(r'(\d+)\+', q)
-                    if r_match: b_name, min_v, max_v = f"{r_match.group(1)}-{r_match.group(2)}", int(r_match.group(1)), int(r_match.group(2))
-                    elif o_match: b_name, min_v, max_v = f"{o_match.group(1)}+", int(o_match.group(1)), 99999
-                    else: continue
-                    try:
-                        tid = json.loads(m['clobTokenIds'])[0]
-                        buckets.append({'bucket': b_name, 'min': min_v, 'max': max_v, 'token': tid})
-                        tokens.append({"token_id": tid, "side": "BUY"}); tokens.append({"token_id": tid, "side": "SELL"})
-                    except: continue
-                if buckets:
-                    buckets.sort(key=lambda x: x['min'])
-                    structure.append({'title': e['title'], 'buckets': buckets})
-
-            price_map = {}
-            if tokens:
-                bulk = self.s.post(API_CONFIG['clob_url'], json=tokens, timeout=5).json()
-                for tid, p in bulk.items():
-                    price_map[tid] = {'bid': float(p.get('BUY', 0) or 0), 'ask': float(p.get('SELL', 0) or 0)}
-
-            final = []
-            for s in structure:
-                clean_b = []
-                for b in s['buckets']:
-                    p = price_map.get(b['token'], {'bid':0, 'ask':0})
-                    clean_b.append({**b, **p})
-                final.append({'title': s['title'], 'buckets': clean_b})
-            return final
-        except Exception: return []
-
-# ==============================================================================
-# 💼 PAPER TRADER
-# ==============================================================================
+# ==========================================
+# 4. PAPER TRADER (CON LOGGING CSV)
+# ==========================================
 class PaperTrader:
-    def __init__(self):
-        self.portfolio = {'cash': 1000.0, 'positions': {}}
-        self.load()
-    
-    def load(self):
-        if os.path.exists(FILES['portfolio']):
-            try:
-                with open(FILES['portfolio'], 'r') as f: self.portfolio = json.load(f)
-            except: pass
-
-    def save(self):
-        with open(FILES['portfolio'], 'w') as f: json.dump(self.portfolio, f, indent=4)
-
-    def get_owned_buckets_val(self, market_title):
-        vals = []
-        for k, v in self.portfolio['positions'].items():
-            if v['market'] == market_title:
-                try:
-                    if "+" in v['bucket']: mid = int(re.search(r'\d+', v['bucket']).group()) + 20
-                    else: 
-                        nums = [int(n) for n in re.findall(r'\d+', v['bucket'])]
-                        mid = sum(nums)/2
-                    vals.append(mid)
-                except: pass
-        return vals
-
-    def execute(self, action, market, bucket, price, shares, reason, context):
-        pos_key = f"{market} | {bucket}"
-        if action == "BUY":
-            cost = shares * price
-            if self.portfolio['cash'] < cost: return None
-            self.portfolio['cash'] -= cost
-            self.portfolio['positions'][pos_key] = {
-                'market': market, 'bucket': bucket, 'shares': shares, 'entry_price': price
-            }
-        elif action in ["SELL", "ROTATE", "TAKE_PROFIT"]:
-            if pos_key not in self.portfolio['positions']: return None
-            pos = self.portfolio['positions'][pos_key]
-            revenue = pos['shares'] * price
-            self.portfolio['cash'] += revenue
-            del self.portfolio['positions'][pos_key]
-            pnl = revenue - (pos['shares'] * pos['entry_price'])
-            self._log_csv(action, market, bucket, price, pos['shares'], reason, pnl)
+    def __init__(self, initial_cash=1000.0):
+        # Asegúrate de que estas rutas coincidan con tu configuración
+        self.file_path = os.path.join(LOGS_DIR, PORTFOLIO_PAPER_TRADER)
+        self.log_path = os.path.join(LOGS_DIR, TRADE_LOG)
         
-        if action == "BUY": self._log_csv(action, market, bucket, price, shares, reason, 0)
-        self.save()
-        snap = {'timestamp': time.time(), 'readable_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'action': action, 'market': market, 'bucket': bucket, 'price': price, 'reason': reason, 'context': context}
-        append_to_json_file(FILES['snapshots'], snap)
-        return f"{action} OK"
+        # --- GESTIÓN DE RIESGO ---
+        self.risk_pct_normal = 0.04  # 4% del capital en jugadas seguras
+        self.risk_pct_lotto = 0.01   # 1% del capital en loterías (FISH)
+        self.min_bet = 5.0           # Apuesta mínima en dólares
+        
+        self.portfolio = self._load()
+        self._ensure_log_header()
 
-    def _log_csv(self, action, market, bucket, price, shares, reason, pnl):
-        header = not os.path.exists(FILES['trades'])
-        with open(FILES['trades'], 'a') as f:
-            if header: f.write("Timestamp,Action,Market,Bucket,Price,Shares,Reason,PnL,Cash_After\n")
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"{ts},{action},{market},{bucket},{price:.3f},{shares:.1f},{reason},{pnl:.2f},{self.portfolio['cash']:.2f}\n")
+        if not self.portfolio:
+            self.portfolio = {"cash": initial_cash, "positions": {}, "history": []}
 
-    def print_market_summary(self, market_title, stats_ctx, buckets_data, decisions):
-        print("-" * 75)
-        print(f">>> {market_title}")
-        print(f"    📊 Act: {stats_ctx['count']} | 🧠 Gauss: μ={stats_ctx['mean']:.1f} σ={stats_ctx['std']:.1f} | ⏳ Quedan: {stats_ctx['hours']:.1f}h")
-        print("-" * 75)
-        print(f"{'BUCKET':<10} | {'BID':<6} | {'ASK':<6} | {'FAIR':<6} | {'Z-SCR':<5} | {'ACCIÓN':<10} | {'MOTIVO'}")
-        for b in buckets_data:
-            act = "-"; reason = "_"
-            for d in decisions:
-                if d['bucket'] == b['bucket']:
-                    act = d['action']; reason = d['reason']
-                    if "BUY" in act: act = f"🟢 {act}"
-                    if "SELL" in act or "ROTATE" in act: act = f"🔴 {act}"
+    def _load(self):
+        if os.path.exists(self.file_path):
             try:
-                if "+" in b['bucket']: mid = int(re.search(r'\d+', b['bucket']).group()) + 20
-                else: 
-                    nums = [int(n) for n in re.findall(r'\d+', b['bucket'])]
-                    mid = sum(nums)/2
-                z = abs(mid - stats_ctx['mean']) / stats_ctx['std']
-            except: z = 0.0
-            fair = b.get('fair', 0.0)
-            print(f"{b['bucket']:<10} | {b['bid']:.3f}  | {b['ask']:.3f}  | {fair:.3f}  | {z:.1f}   | {act:<10} | {reason}")
-        print("-" * 75)
+                with open(self.file_path, 'r') as f: return json.load(f)
+            except: return None
+        return None
 
-    def print_portfolio_summary(self):
-        print("\n💼 --- PORTFOLIO ---")
-        print(f"   {'FECHAS EVENTO':<30} | {'BUCKET':<10} | {'ENTRADA':<8} | {'SHARES':<8}")
-        print("   " + "-"*65)
-        total_equity = self.portfolio['cash']
-        for k, v in self.portfolio['positions'].items():
-            short_m = v['market'].replace("Elon Musk # tweets ", "")[:30]
-            print(f"   🔹 {short_m:<30} | {v['bucket']:<10} | ${v['entry_price']:.3f}   | {v['shares']:.1f}")
-            total_equity += (v['shares'] * v['entry_price'])
-        print("   " + "-"*65)
-        print(f"   💵 Cash: ${self.portfolio['cash']:.2f} | 📈 Equity Est: ${total_equity:.2f}")
-        print("-" * 75)
+    def _save(self):
+        with open(self.file_path, 'w') as f: json.dump(self.portfolio, f, indent=2)
 
-# ==============================================================================
-# 🚀 EJECUCIÓN PRINCIPAL
-# ==============================================================================
+    def _ensure_log_header(self):
+        """Crea el archivo CSV con cabeceras si no existe"""
+        if not os.path.exists(self.log_path):
+            with open(self.log_path, "w", encoding='utf-8') as f:
+                f.write("Timestamp,Action,Market,Bucket,Price,Shares,Reason,PnL,Cash_After\n")
+
+    def _clean_market_name(self, full_title):
+        """Limpia el nombre del mercado para el log"""
+        import re
+        month_map = {
+            "january": "Jan", "february": "Feb", "march": "Mar", "april": "Apr",
+            "may": "May", "june": "Jun", "july": "Jul", "august": "Aug",
+            "september": "Sep", "october": "Oct", "november": "Nov", "december": "Dec"
+        }
+        pattern = r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d+)'
+        matches = re.findall(pattern, full_title, re.IGNORECASE)
+        
+        if len(matches) >= 2:
+            m1, d1 = matches[0]; m2, d2 = matches[1]
+            m1_short = month_map.get(m1.lower(), m1[:3].title())
+            m2_short = month_map.get(m2.lower(), m2[:3].title())
+            return f"{m1_short} {d1} - {m2_short} {d2}"
+        elif len(matches) == 1:
+            m1, d1 = matches[0]
+            m1_short = month_map.get(m1.lower(), m1[:3].title())
+            return f"Event {m1_short} {d1}"
+        return "Evento Global"
+
+    def _log_trade(self, action, market, bucket, price, shares, reason, pnl=0.0):
+        """Escribe una línea en el CSV"""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        market_clean = market.replace(",", "")
+        reason_clean = reason.replace(",", ".")
+        
+        row = f"{ts},{action},{market_clean},{bucket},{price:.3f},{shares:.1f},{reason_clean},{pnl:.2f},{self.portfolio['cash']:.2f}\n"
+        
+        with open(self.log_path, "a", encoding='utf-8') as f:
+            f.write(row)
+
+    def _calculate_position_size(self, signal, reason, available_cash):
+        """
+        Calcula cuánto dinero apostar basado en el tipo de jugada.
+        """
+        # 1. Determinar el porcentaje de riesgo
+        if "FISH" in signal or "Lotto" in reason:
+            pct = self.risk_pct_lotto # 1% para Lotería
+        else:
+            pct = self.risk_pct_normal # 4% para Normal
+            
+        # 2. Calcular monto
+        bet_amount = available_cash * pct
+        
+        # 3. Aplicar suelo mínimo (para no hacer trades de 50 céntimos)
+        bet_amount = max(bet_amount, self.min_bet)
+        
+        # 4. Cap final: No podemos apostar más de lo que tenemos
+        if bet_amount > available_cash:
+            bet_amount = available_cash
+            
+        return bet_amount
+
+    def execute(self, market_title, bucket, signal, price, reason="Manual"):
+        pos_id = f"{market_title}|{bucket}"
+        
+        # --- COMPRA ---
+        if "BUY" in signal or "FISH" in signal: # FISH también es una compra
+            if pos_id not in self.portfolio["positions"]:
+                
+                # CÁLCULO DINÁMICO DEL TAMAÑO
+                bet_amount = self._calculate_position_size(signal, reason, self.portfolio["cash"])
+                
+                # Solo ejecutamos si tenemos cash suficiente y el monto merece la pena
+                if self.portfolio["cash"] >= bet_amount and bet_amount >= self.min_bet:
+                    shares = bet_amount / price
+                    self.portfolio["cash"] -= bet_amount
+                    
+                    self.portfolio["positions"][pos_id] = {
+                        "shares": shares,
+                        "entry_price": price,
+                        "market": market_title,
+                        "bucket": bucket,
+                        "timestamp": time.time(),
+                        "invested": bet_amount # Guardamos cuánto invertimos
+                    }
+                    self._save()
+                    
+                    # LOGGING
+                    self._log_trade(signal, market_title, bucket, price, shares, reason)
+                    return f"✅ BUY ({reason}): ${bet_amount:.2f} ({shares:.1f} shares @ {price:.3f})"
+                else:
+                    return None # No hay cash suficiente
+
+        # --- VENTA ---
+        elif ("SELL" in signal or "DUMP" in signal):
+            if pos_id in self.portfolio["positions"]:
+                pos = self.portfolio["positions"].pop(pos_id)
+                revenue = pos["shares"] * price
+                
+                # Recuperamos el coste original (si no lo guardamos antes, lo estimamos)
+                cost_basis = pos.get("invested", pos["shares"] * pos["entry_price"])
+                
+                profit = revenue - cost_basis
+                roi = (profit / cost_basis) * 100 if cost_basis > 0 else 0
+                
+                self.portfolio["cash"] += revenue
+                
+                trade_record = {
+                    "market": market_title,
+                    "bucket": bucket,
+                    "profit": profit,
+                    "roi": roi,
+                    "exit_time": time.time()
+                }
+                self.portfolio["history"].append(trade_record)
+                self._save()
+                
+                # LOGGING
+                self._log_trade(signal, market_title, bucket, price, pos['shares'], reason, pnl=profit)
+                
+                color = "💰" if profit > 0 else "💸"
+                return f"{color} SELL: P&L ${profit:.2f} ({roi:+.1f}%)"
+        
+        return None
+
+    # -----------------------------------------------------------
+    # 1. Añade este método auxiliar a tu clase (o fuera de ella)
+    # -----------------------------------------------------------
+    def _get_event_label(self, start_ts, duration_days=7):
+        """Convierte un timestamp en un texto: 'Tweets del 12 Dic al 19 Dic'"""
+        import datetime
+        
+        # Diccionario de meses
+        meses = {1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
+                 7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic"}
+        
+        try:
+            # Asumimos que el bucket ID es el timestamp de inicio
+            ts = float(start_ts)
+            dt_start = datetime.datetime.fromtimestamp(ts)
+            dt_end = dt_start + datetime.timedelta(days=duration_days)
+            
+            m_start = meses.get(dt_start.month, "")
+            m_end = meses.get(dt_end.month, "")
+            
+            if dt_start.month == dt_end.month:
+                return f"Tweets {dt_start.day}-{dt_end.day} {m_start}"
+            else:
+                return f"Tweets {dt_start.day} {m_start} - {dt_end.day} {m_end}"
+        except:
+            return f"Evento {start_ts}" # Fallback si falla la fecha
+
+    # -----------------------------------------------------------
+    # 2. Tu función print_summary modificada
+    # -----------------------------------------------------------
+    def print_summary(self, current_prices_data):
+        cash = self.portfolio["cash"]
+        invested_value = 0.0
+        
+        # Lista temporal para almacenar filas antes de imprimir
+        rows_to_print = []
+
+        print("\n💼 --- PORTFOLIO (SIMULADO) ---")
+        print(f"   🔹 {'FECHAS EVENTO':<20} | {'BUCKET':<10} | {'PRECIO ENT.':<12} | {'PRECIO ACT.':<12} | {'P&L ($)':<10}")
+        print("   " + "-"*85)
+
+        for pid, pos in self.portfolio["positions"].items():
+            current_price = pos['entry_price']
+            
+            # 1. Obtener nombre limpio del evento
+            full_title = pos.get('market', 'Unknown')
+            event_date_label = self._clean_market_name(full_title)
+            
+            # 2. Buscar precio actual en los datos del scanner
+            found = False
+            for m in current_prices_data:
+                # Usamos una comparación laxa (si el título limpio coincide)
+                if self._clean_market_name(m['title']) == event_date_label: 
+                    for b in m['buckets']:
+                        if str(b['bucket']) == str(pos['bucket']):
+                            current_price = b.get('bid', 0)
+                            found = True
+                            break
+                if found: break
+            
+            # --- 🧹 FILTRO DE LIMPIEZA (NUEVO) ---
+            # Si 'found' sigue siendo False, significa que el mercado ya no está en el escáner
+            # (porque expiró o se filtró por tiempo). Lo saltamos para que no salga en pantalla.
+            if not found:
+                continue
+            # -------------------------------------
+            
+            # Cálculos financieros
+            val = pos['shares'] * current_price
+            pnl = val - (pos['shares'] * pos['entry_price'])
+            invested_value += val
+            
+            # 3. Preparar datos para ordenación
+            # Extraemos el valor numérico del bucket para ordenar (ej: "280-299" -> 280)
+            try:
+                bucket_str = str(pos['bucket'])
+                # Tomamos lo que hay antes del guion o el más
+                bucket_val = int(bucket_str.split('-')[0].replace('+', ''))
+            except:
+                bucket_val = 99999 # Si falla, lo mandamos al final
+
+            # Guardamos en la lista en lugar de imprimir directamente
+            rows_to_print.append({
+                'label': event_date_label,
+                'bucket_str': str(pos['bucket']),
+                'bucket_val': bucket_val,
+                'entry': pos['entry_price'],
+                'current': current_price,
+                'pnl': pnl
+            })
+
+        # 4. ORDENACIÓN MÁGICA
+        # Primero por Nombre de Evento (label), luego por Bucket (bucket_val)
+        rows_to_print.sort(key=lambda x: (x['label'], x['bucket_val']))
+
+        # 5. IMPRESIÓN LIMPIA
+        last_label = None
+        for row in rows_to_print:
+            # Si cambiamos de evento, ponemos una línea separadora
+            if last_label and row['label'] != last_label:
+                print("   " + "-"*85)
+            
+            print(f"   🔹 {row['label']:<20} | {row['bucket_str']:<10} | ${row['entry']:<11.3f} | ${row['current']:<11.3f} | {row['pnl']:+6.2f}")
+            last_label = row['label']
+
+        total_equity = cash + invested_value
+        total_pnl = total_equity - 1000
+        
+        print("   " + "-"*85)
+        print(f"   💵 Cash: ${cash:.2f} | 📈 Equity: ${total_equity:.2f} | 🚀 Total P&L: {total_pnl:+.2f}")
+        print("-------------------------------------------------------------------------------------")
+
+# ==========================================
+# 5. SENSOR DE PÁNICO (DETECTOR DE MOMENTUM V9)
+# ==========================================
+class MarketPanicSensor:
+    def __init__(self, sensitivity=1.5):
+        self.history = {} 
+        self.sensitivity = sensitivity
+        self.window_size = 5
+
+    def analyze(self, market_data):
+        alerts = []
+        for m in market_data:
+            for b in m['buckets']:
+                key = f"{m['title']}|{b['bucket']}"
+                if key not in self.history:
+                    self.history[key] = {'asks': deque(maxlen=self.window_size), 'bids': deque(maxlen=self.window_size)}
+                
+                hist = self.history[key]
+                ask = b['ask'] # Precio de compra (para detectar subidas)
+                bid = b['bid'] # Precio de venta (para detectar bajadas/dumps)
+                
+                hist['asks'].append(ask)
+                hist['bids'].append(bid)
+                
+                if len(hist['asks']) >= 3:
+                    avg_ask = sum(hist['asks']) / len(hist['asks'])
+                    avg_bid = sum(hist['bids']) / len(hist['bids'])
+                    
+                    # 1. DETECTOR DE PUMP (Ola subiendo - FOMO)
+                    # Si el precio sube violentamente -> Posible entrada en bucket siguiente
+                    if avg_ask > 0.01 and ask > (avg_ask * self.sensitivity):
+                        alerts.append({
+                            'type': 'PUMP',
+                            'market_title': m['title'],
+                            'bucket': b['bucket'],
+                            'min': b.get('min', 0),
+                            'price': ask,
+                            'change': (ask/avg_ask) - 1.0
+                        })
+
+                    # 2. DETECTOR DE DUMP (Ola rompiendo - PÁNICO)
+                    # Si el BID cae violentamente (ej: de 0.50 a 0.30) -> Oportunidad de Recompra o Stop Loss
+                    # Usamos la inversa de la sensibilidad (ej: precio < media / 1.5)
+                    if avg_bid > 0.05 and bid < (avg_bid / self.sensitivity):
+                        alerts.append({
+                            'type': 'DUMP',
+                            'market_title': m['title'],
+                            'bucket': b['bucket'],
+                            'min': b.get('min', 0), 
+                            'price': bid,
+                            'change': (bid/avg_bid) - 1.0
+                        })
+                        
+        return alerts
+
+# ==========================================
+# 6. DIRECTOR DE ORQUESTA V9.3 (NUCLEAR SAFETY FINAL)
+# ==========================================
 def run():
-    print("🤖 ELON BOT V11.7 [V10 SENSOR + V11 BRAIN]")
+    print("\n🤖 ELON-BOT: V10.1 (HAWKES + HYBRID BRAIN + SMART EXIT)")
+    print("======================================================")
     
+    # --- SISTEMA DE LOGGING AUTOMÁTICO ---
+    def log_monitor(message, force_print=False):
+        """Escribe en el diario automático y opcionalmente en pantalla"""
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{ts}] {message}"
+        try:
+            with open(os.path.join(LOGS_DIR, MONITOR_LOG), "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except: pass
+        if force_print: print(line)
+
+    def save_trade_snapshot(action, market, bucket, price, reason, context_data):
+        """Guarda una 'foto' completa de la decisión para auditoría"""
+        ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{ts_str}_{action}_{bucket}.json"
+        filepath = os.path.join(SNAPSHOTS_DIR, filename)
+        
+        # Sanitizar datos para JSON
+        if 'simulations_sample' in context_data:
+            try: context_data['simulations_sample'] = [float(x) for x in context_data['simulations_sample']]
+            except: pass
+            
+        snapshot = {
+            "timestamp": time.time(),
+            "readable_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "action": action, "market": market, "bucket": bucket,
+            "price": price, "reason": reason, "context": context_data
+        }
+        with open(filepath, "w", encoding="utf-8") as f: json.dump(snapshot, f, indent=2)
+        log_monitor(f"📸 SNAPSHOT: {filename}")
+
+    def save_market_tape(clob_data, markets_meta):
+        """Graba el estado COMPLETO del mercado para análisis futuro"""
+        ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"tape_{ts_str}.json"
+        filepath = os.path.join(MARKET_TAPE_DIR, filename)
+        tape_record = {
+            "timestamp": time.time(),
+            "readable_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "meta": markets_meta, "order_book": clob_data
+        }
+        with open(filepath, "w", encoding="utf-8") as f: json.dump(tape_record, f)
+
+    # --- INICIALIZACIÓN ---
+    def get_bio_multiplier():
+        now = datetime.now()
+        h_mult = HOURLY_MULTIPLIERS.get(now.hour, 1.0)
+        d_mult = DAILY_MULTIPLIERS.get(now.weekday(), 1.0)
+        return h_mult * d_mult, h_mult, d_mult
+
     brain = HawkesBrain()
     sensor = PolymarketSensor()
     pricer = ClobMarketScanner()
-    trader = PaperTrader()
+    trader = PaperTrader(initial_cash=1000.0)
+    panic_sensor = MarketPanicSensor(sensitivity=1.4) 
     
-    last_tweets = []
-    if os.path.exists(FILES['history']):
+    last_counts = {}
+    last_retrain_time = time.time()
+    last_monitor_log_time = 0
+    last_tape_recording_time = 0
+    
+    RETRAIN_INTERVAL = 21600
+    tape_interval_dynamic = 1800 
+
+    global_events = []
+    log_path = os.path.join(LOGS_DIR, LIVE_LOG)
+    
+    # Cargar historial
+    if os.path.exists(log_path):
         try:
-            with open(FILES['history']) as f: 
-                data = json.load(f)
-                if data:
-                    if isinstance(data[0], dict): last_tweets = [e['timestamp'] for e in data]
-                    else: last_tweets = data
-            print(f"📂 Historial cargado: {len(last_tweets)} tweets.")
+            with open(log_path) as f: 
+                d = json.load(f)
+                global_events = [e for e in d if (time.time()*1000 - e['timestamp']) < 86400000]
         except: pass
 
-    REFRESH_RATE = 10 # Si ves bloqueos, súbelo a 10
-    last_known_counts = {}
+    log_monitor("🚀 INICIO V10.1 (HYBRID + SMART EXIT)", force_print=True)
 
     while True:
         try:
-            start_time = time.time()
+            # 1. MANTENIMIENTO
+            if time.time() - last_retrain_time > RETRAIN_INTERVAL:
+                brain.load_and_train()
+                last_retrain_time = time.time()
+                log_monitor("🧠 Cerebro Re-entrenado")
+
+            # 2. ESCANEO (XTRACKER)
+            markets = sensor.get_active_counts()
+            markets_map = {m['title'].lower(): m for m in markets}
+
+            if not markets: 
+                print("💤 No active markets...", end="\r")
+                time.sleep(5) 
+                continue
             
-            # 1. Obtener Datos
-            markets_xtracker = sensor.get_active_counts()
+            # MODO ADRENALINA vs CRUCERO
+            min_hours_left = min([m['hours'] for m in markets]) if markets else 99.0
+            
+            if min_hours_left < 1.0: 
+                current_mode = "🩸 ADRENALINA"
+                tape_interval_dynamic = 10     
+                panic_sens = 1.15              
+                refresh_sleep = 3.0 #0.5 --> sustituimos para mayor velocidad  
+            else:
+                current_mode = "🚢 CRUCERO"
+                tape_interval_dynamic = 1800   
+                panic_sens = 1.40              
+                refresh_sleep =  15 #2.0        --> sustituimos para mayor velocidad    
+
+            panic_sensor.sensitivity = panic_sens
+
+            # 3. DETECCIÓN DE TWEETS
+            tweet_detected = False
+            changes = []
+            max_diff = 0
+            for m in markets:
+                curr = m['count']
+                prev = last_counts.get(m['id'])
+                if prev is None: last_counts[m['id']] = curr; continue
+                if curr > prev:
+                    diff = curr - prev
+                    if diff > max_diff: max_diff = diff
+                    changes.append(f"{m['title']}: +{diff}")
+                    tweet_detected = True
+                last_counts[m['id']] = curr
+
+            now_ms = time.time() * 1000
+            if tweet_detected:
+                msg = f"🚨 TWEET DETECTADO: {changes}"
+                print(f"\n{msg}")
+                log_monitor(msg)
+                for _ in range(max_diff): global_events.append({'timestamp': now_ms})
+                with open(log_path, 'w') as f: json.dump(global_events, f)
+            
+            global_events = [e for e in global_events if (now_ms - e['timestamp']) < 86400000]
+            
+            # =========================================================
+            # 🛡️ ZONA DE SEGURIDAD MAESTRA (DEFINICIÓN)
+            # =========================================================
+            events_24h = [e for e in global_events if (now_ms - e['timestamp']) < 24*3600*1000]
+            ts_list = [e['timestamp'] for e in global_events]
+            
+            # REGLA: Necesitamos al menos 5 tweets para operar.
+            IS_WARMUP = len(ts_list) < 5
+            
+            # 4. CÁLCULO DE TENDENCIA
+            if len(global_events) < 5: 
+                pace_24h = 4.0; pace_status = "🔰 WARMUP"
+            else:
+                pace_24h = len(events_24h) / 24.0
+                pace_status = "🔥" if pace_24h > 3.5 else ("❄️" if pace_24h < 2.0 else "😐")
+            # =========================================================
+
+            # 5. ORDER BOOK & TRADING
             clob_data = pricer.get_market_prices()
             
-            if not markets_xtracker:
-                print(f"💤 Esperando datos API...", end="\r")
-                time.sleep(REFRESH_RATE)
-                continue
+            if clob_data:
+                bio_mult, h_m, d_m = get_bio_multiplier()
 
-            # 2. Detector de Tweets
-            markets_xtracker.sort(key=lambda x: x['count'], reverse=True)
-            master_m = markets_xtracker[0]
-            master_id = master_m['id']
-            current_count = master_m['count']
-            
-            if master_id not in last_known_counts: last_known_counts[master_id] = current_count
-            delta = current_count - last_known_counts[master_id]
-            
-            if delta > 0:
-                print(f"\n🐦 ¡NUEVO TWEET! (+{delta})")
-                now_ts = time.time()
-                for _ in range(int(delta)): last_tweets.append(now_ts)
-                try:
-                    with open(FILES['history'], 'w') as f: json.dump([{'timestamp': t} for t in last_tweets], f, indent=2)
-                except: pass
-                last_known_counts[master_id] = current_count
-
-            IS_WARMUP = len(last_tweets) < 5
-            
-            # 3. Análisis
-            for m_poly in markets_xtracker:
-                m_title = m_poly['title']
-                m_clob = next((c for c in clob_data if titles_match_paranoid(m_title, c['title'])), None)
-                if not m_clob: continue
+                # --- A. ALERTAS DE PÁNICO (AHORA CON CANDADO) ---
+                raw_alerts = panic_sensor.analyze(clob_data)
                 
-                tape_rec = {'timestamp': time.time(), 'market': m_title, 'buckets': m_clob['buckets']}
-                append_to_json_file(FILES['market_tape'], tape_rec)
+                # 🔒 CANDADO: Si estamos en WARMUP, el pánico está desactivado
+                if not IS_WARMUP:
+                    for alert in raw_alerts:
+                        m_info = next((m for t, m in markets_map.items() if t in alert['market_title'].lower()), None)
+                        if not m_info: continue
 
-                # Predicción
-                pred_val, pred_std = brain.predict(last_tweets, m_poly['hours'])
-                final_sim_mean = m_poly['count'] + pred_val
-                if pred_std < 5: pred_std = 5.0
-                
-                mkt_consensus = brain.get_market_consensus(m_poly, m_clob['buckets'])
-                
-                if mkt_consensus:
-                    combined_mean = (final_sim_mean * (1 - MARKET_WEIGHT)) + (mkt_consensus * MARKET_WEIGHT)
-                    effective_std = max(pred_std + (abs(final_sim_mean - mkt_consensus)/4), 5.0)
-                else:
-                    combined_mean = final_sim_mean
-                    effective_std = pred_std
-
-                # Decisiones
-                stats_ctx = {"count": m_poly['count'], "mean": combined_mean, "std": effective_std, "hours": m_poly['hours']}
-                my_buckets = trader.get_owned_buckets_val(m_title)
-                decisions_log = []
-                
-                for b in m_clob['buckets']:
-                    p_min = norm.cdf(b['min'], combined_mean, effective_std)
-                    p_max = norm.cdf(b['max'], combined_mean, effective_std)
-                    fair = p_max - p_min
-                    if "+" in b['bucket']: fair = 1.0 - p_min
-                    b['fair'] = fair
-
-                for b in m_clob['buckets']:
-                    bid = b['bid']; ask = b['ask']; fair = b['fair']
-                    b_mid = (b['min'] + b['max']) / 2
-                    z_score = abs(b_mid - combined_mean) / effective_std
-                    
-                    pos_key = f"{m_title} | {b['bucket']}"
-                    has_pos = pos_key in trader.portfolio['positions']
-                    context = {"combined_mean": combined_mean, "z_score": z_score, "fair": fair}
-
-                    if not has_pos and not IS_WARMUP:
-                        if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
-                            is_cluster_ok = True
-                            if ENABLE_CLUSTERING and my_buckets:
-                                is_cluster_ok = any(abs(b_mid - ov) <= CLUSTER_RANGE for ov in my_buckets)
-                            
-                            if is_cluster_ok and fair > (ask + 0.15):
-                                shares = min(trader.portfolio['cash'] / ask, 500)
-                                if shares > 10:
-                                    reason = f"Val+{fair-ask:.2f}"
-                                    trader.execute("BUY", m_title, b['bucket'], ask, shares, reason, context)
-                                    decisions_log.append({'bucket': b['bucket'], 'action': 'BUY', 'reason': reason})
-
-                    elif has_pos:
-                        pos = trader.portfolio['positions'][pos_key]
-                        entry = pos['entry_price']
-                        profit = (bid - entry) / entry if entry > 0 else 0
+                        distancia = alert['min'] - m_info['count']
                         
-                        if z_score > 2.0:
-                            reason = f"Rot(Z={z_score:.1f})"
-                            trader.execute("ROTATE", m_title, b['bucket'], bid, pos['shares'], reason, context)
-                            decisions_log.append({'bucket': b['bucket'], 'action': 'ROTATE', 'reason': reason})
-                        elif profit > 0.30 and z_score > 1.8:
-                            reason = f"Pft+{profit*100:.0f}%"
-                            trader.execute("TAKE_PROFIT", m_title, b['bucket'], bid, pos['shares'], reason, context)
-                            decisions_log.append({'bucket': b['bucket'], 'action': 'PROFIT', 'reason': reason})
-                
-                trader.print_market_summary(m_title, stats_ctx, m_clob['buckets'], decisions_log)
+                        if alert['type'] == 'PUMP':
+                            if 0 < distancia < 10: 
+                                trader.execute(alert['market_title'], alert['bucket'], "🏄 SURF BUY", alert['price'], 
+                                            reason=f"Pump Momentum (+{alert['change']:.1%})")
 
-            trader.print_portfolio_summary()
+                        elif alert['type'] == 'DUMP':
+                            sims = brain.predict(ts_list, m_info['hours'])
+                            mean_prediction = m_info['count'] + np.mean(sims) * bio_mult
+                            
+                            if mean_prediction >= alert['min']:
+                                trader.execute(alert['market_title'], alert['bucket'], "💎 DIP BUY", alert['price'], 
+                                            reason=f"Pánico Injustificado (-{alert['change']:.1%})")
+                
+                # --- B. LOGGING & TAPE ---
+                if time.time() - last_monitor_log_time > 900: 
+                    status_pace = "WARMUP" if IS_WARMUP else f"{pace_24h:.1f}"
+                    log_monitor(f"STATUS | Mode: {current_mode} | Pace: {status_pace} t/h | Bio: x{bio_mult:.2f}")
+                    last_monitor_log_time = time.time()
+
+                if time.time() - last_tape_recording_time > tape_interval_dynamic:
+                    save_market_tape(clob_data, markets)
+                    last_tape_recording_time = time.time()
+                    if current_mode == "🩸 ADRENALINA":
+                        print("   📼 Tape High-Res Grabado")
+                
+                warn_txt = "⚠️ WARMUP (NO TRADING)" if IS_WARMUP else f"Pace: {pace_24h:.1f} t/h"
+                print(f"\n⏱️ {datetime.now().strftime('%H:%M:%S')} | {current_mode} | {warn_txt}")
+
+            # Func. Auxiliar CORREGIDA (FIX CRITICO MEZCLA DE FECHAS)
+            def titles_match(tracker_title, market_title):
+                t1 = tracker_title.lower()
+                t2 = market_title.lower()
+                
+                # 1. Limpieza estricta: Si uno contiene el rango del otro literalmente, es match
+                # (Ej: "Jan 23 - Jan 30" está dentro de "Elon Musk Jan 23 - Jan 30")
+                if t1 in t2 or t2 in t1: return True
+                
+                # 2. Comparación Numérica INTELIGENTE (Ignorando Años)
+                # Extraemos números, pero filtramos '2025', '2026' para evitar falsos positivos por el año.
+                def get_relevant_nums(txt):
+                    nums = set(re.findall(r'\d+', txt))
+                    return {n for n in nums if n not in ['2024', '2025', '2026']}
+
+                nums1 = get_relevant_nums(t1)
+                nums2 = get_relevant_nums(t2)
+                
+                # AHORA la intersección entre "16-23" y "23-30" será solo {'23'}.
+                # Len 1 < 2. NO hará match. Correcto.
+                return len(nums1.intersection(nums2)) >= 2
             
-            elapsed = time.time() - start_time
-            sleep_time = max(0.1, REFRESH_RATE - elapsed)
-            print(f"⏱️ Scan took {elapsed:.2f}s | Sleeping {sleep_time:.1f}s... (Tweets: {len(last_tweets)})", end="\r")
-            time.sleep(sleep_time)
+            # --- 6. GESTIÓN ACTIVA DE PORTAFOLIO (ANNICA) ---
+            if clob_data and trader.portfolio:
+                for pos_key, pos_data in list(trader.portfolio.items()):
+                    # Anti-Crash Fix
+                    parts = pos_key.split(" | ")
+                    if len(parts) != 2: continue
+                    m_title, b_name = parts
+
+                    # Buscar precio
+                    current_price = 0.0
+                    for m_clob in clob_data:
+                        if titles_match(m_title, m_clob['title']):
+                            for b_clob in m_clob['buckets']:
+                                if b_clob['bucket'] == b_name:
+                                    current_price = b_clob['bid']
+                                    break
+                    
+                    if current_price > 0:
+                        roi = (current_price - pos_data['avg_price']) / pos_data['avg_price']
+                        if roi > 0.20 and pos_data['shares'] > 500:
+                            trader.execute(m_title, b_name, "💰 SCALP SELL", current_price, 
+                                         reason=f"Annica: Take Profit (+{roi*100:.1f}%)")
+
+            # --- 7. ANÁLISIS DE MERCADO (GAUSSIAN ENGINE) ---
+            for m_poly in markets:
+                if m_poly['hours'] > 0.1: m_poly['active'] = True
+                if m_poly['hours'] < 0.25: continue
+
+                relevant_prices = next((p for p in clob_data if titles_match(m_poly['title'], p['title'])), None)
+                if not relevant_prices: continue
+
+                # PREDICCIÓN (CON PROTECCIÓN VISUAL)
+                hours_to_predict = m_poly['hours']
+                if hours_to_predict > 14.0: hours_to_predict -= 12.0
+                else: hours_to_predict *= 0.90
+
+                if IS_WARMUP:
+                    pred_mean = float(m_poly['count'])
+                    pred_std = 1.0 # Dummy
+                    print(f"   ⚠️ WARMUP: Esperando {5-len(ts_list)} tweets más...", end="\r")
+                else:
+                    base_sims = brain.predict(ts_list, hours_to_predict)
+                    sims = [s * bio_mult for s in base_sims] 
+                    final_sims = np.array([m_poly['count'] + s for s in sims])
+                    
+                    pred_mean = np.mean(final_sims)
+
+                    # -----------------------------------------------------------
+                    # 🧠 CEREBRO HÍBRIDO DINÁMICO (HAWKES + LINEAR)
+                    # -----------------------------------------------------------
+                    daily_avg = m_poly.get('daily_avg', 0.0)
+                    
+                    if daily_avg > 0:
+                        linear_pace_hourly = daily_avg / 24.0
+                        linear_projection = m_poly['count'] + (linear_pace_hourly * hours_to_predict)
+                        
+                        # AJUSTE DINÁMICO DE PESOS SEGÚN TIEMPO RESTANTE
+                        # Si queda mucho tiempo (>24h), confiamos más en la media histórica (Lineal).
+                        # Si queda poco tiempo (<24h), confiamos más en la ráfaga actual (Hawkes).
+                        
+                        if hours_to_predict > 24.0:
+                            # Evento Largo: La media manda.
+                            # 60% Lineal (Estabilidad) / 40% Hawkes (Tendencia)
+                            weight_linear = 0.60
+                            weight_hawkes = 0.40
+                        else:
+                            # Evento Corto: El momentum manda.
+                            # 30% Lineal / 70% Hawkes
+                            weight_linear = 0.30
+                            weight_hawkes = 0.70
+                            
+                        # Cálculo de la mezcla
+                        adjusted_mean = (pred_mean * weight_hawkes) + (linear_projection * weight_linear)
+                        
+                        # Debug
+                        # print(f"   ⚖️ Híbrido ({hours_to_predict:.1f}h left): Hawkes {pred_mean:.0f} (x{weight_hawkes}) + Linear {linear_projection:.0f} (x{weight_linear}) -> {adjusted_mean:.0f}")
+                        
+                        pred_mean = adjusted_mean
+                    # ...
+                        
+                    # -----------------------------------------------------------
+
+                    pred_std = np.std(final_sims)
+                    
+                    if pred_std < 0.01: pred_std = 0.01
+
+                    # 🛑 NUEVO: DAMPENING (AMORTIGUADOR DE LOCURA)
+                    MAX_ALLOWED_STD = 120.0
+                    effective_std = min(pred_std, MAX_ALLOWED_STD)
+
+                # Unificar variable para el resto del código
+                if 'effective_std' not in locals(): effective_std = pred_std
+
+                # VISUALIZACIÓN
+                dias = int(m_poly['hours'] // 24)
+                horas_rest = int(m_poly['hours'] % 24)
+                time_str = f"{dias}d {horas_rest}h" if dias > 0 else f"{m_poly['hours']:.1f}h"
+                
+                blind_tag = " (👁️ CIEGO - NO TRADING)" if IS_WARMUP else ""
+
+                print("-" * 75)
+                print(f"\n>>> {m_poly['title']}{blind_tag}")
+                print(f"    📊 Act: {m_poly['count']} Avg: {m_poly['daily_avg']:.0f} | 🧠 Gauss: μ={pred_mean:.1f} σ={effective_std:.1f} | ⏳ Quedan: {time_str}")
+                print("-" * 75)
+                print(f"{'BUCKET':<10} | {'BID':<8} | {'ASK':<8} | {'FAIR':<8} | {'ACCIÓN':<10} | {'MOTIVO'}")
+                
+                min_feasible_total = m_poly['count'] + (m_poly['hours'] * 0.9)
+                is_long_term = (m_poly['hours'] > 72.0)
+                
+                # --- PRE-SCAN PARA GESTIÓN DE INVENTARIO (SMART EXIT) ---
+                # Buscamos si tenemos posiciones abiertas en este mercado
+                my_positions = [
+                    (k.split(" | ")[1], v) for k, v in trader.portfolio.items() 
+                    if titles_match(m_poly['title'], k.split(" | ")[0])
+                ]
+
+                # BUCLE PRINCIPAL DE BUCKETS
+                for b in relevant_prices['buckets']:
+                    if 'min' not in b: continue 
+
+                    current_bid = b.get('bid', 0)
+                    current_ask = b.get('ask', 0)
+                    t_slug = b['bucket']
+
+                    # ============================================
+                    # 🧹 SMART EXIT: GARBAGE COLLECTOR (ASYMMETRIC)
+                    # ============================================
+                    my_pos_data = next((p[1] for p in my_positions if p[0] == t_slug), None)
+                    
+                    if my_pos_data:
+                        bucket_mid = (b['min'] + b['max']) / 2
+                        dist_to_pred = abs(bucket_mid - pred_mean)
+                        safe_std = max(effective_std, 10.0) 
+                        z_score = dist_to_pred / safe_std
+                        
+                        my_avg_price = my_pos_data['avg_price']
+                        
+                        # --- LÓGICA ASIMÉTRICA ---
+                        
+                        should_sell = False
+                        action_tag = ""
+                        reason_tag = ""
+
+                        # 1. ¿TENEMOS GANANCIA? (MODO AVARICIA) 🤑
+                        # Somos estrictos: Si la tesis se debilita un poco (> 2.0 sigmas)
+                        # y tenemos dinero sobre la mesa, lo cogemos.
+                        if current_bid > my_avg_price:
+                            profit_pct = 0
+                            if my_avg_price > 0: profit_pct = ((current_bid - my_avg_price) / my_avg_price) * 100
+                            
+                            # Si estamos a más de 2 sigmas (algo improbable) y ganamos >10%... FUERA.
+                            # Tu caso: 740+ está a 3.3 sigmas. Entrará aquí.
+                            if z_score > 2.0 and profit_pct > 10.0:
+                                should_sell = True
+                                action_tag = "💰 EXIT"
+                                reason_tag = f"Take Profit (Weak Thesis {z_score:.1f}σ)"
+
+                        # 2. ¿TENEMOS PÉRDIDA? (MODO PACIENCIA) 🧘
+                        # Somos laxos: Solo asumimos la pérdida si es casi imposible o se acaba el tiempo.
+                        elif hours_to_predict < 24.0:
+                            # Recta final: Limpieza media
+                            if z_score > 2.0: 
+                                recoverable_ratio = 0
+                                if my_avg_price > 0: recoverable_ratio = current_bid / my_avg_price
+                                if recoverable_ratio > 0.20:
+                                    should_sell = True
+                                    action_tag = "💀 EXIT"
+                                    reason_tag = f"Salvage Final ({z_score:.1f}σ)"
+                        else:
+                            # Queda mucho tiempo (>24h): Solo vendemos si es ABSURDO (> 4.0 sigmas)
+                            if z_score > 4.0 and current_bid > 0.002:
+                                should_sell = True
+                                action_tag = "🗑️ DUMP"
+                                reason_tag = f"Trash Cleaning ({z_score:.1f}σ)"
+
+                        # --- EJECUCIÓN ---
+                        if should_sell:
+                            trade_res = trader.execute(m_poly['title'], t_slug, action_tag, current_bid, reason=reason_tag)
+                            if trade_res:
+                                print(f"{t_slug:<10} | {current_bid:.3f}    | {current_ask:.3f}    | {'-':<8} | {action_tag:<10} | {reason_tag}")
+                                context = {
+                                    "predicted_mean": pred_mean, "predicted_std": effective_std,
+                                    "z_score": z_score, "hours_left": hours_to_predict,
+                                    "my_avg_price": my_avg_price, "current_bid": current_bid
+                                }
+                                save_trade_snapshot(action_tag, m_poly['title'], t_slug, current_bid, reason_tag, context)
+                            
+                            continue # Saltamos al siguiente bucket
+                    # ============================================
+                    
+                    # Filtros de visualización para limpiar la pantalla
+                    if b['max'] < m_poly['count']: continue
+                    if b['max'] < min_feasible_total: continue 
+                    
+                    # ============================================
+                    # ⛔ ZONA DE SEGURIDAD: CANDADO NUCLEAR
+                    # ============================================
+                    if IS_WARMUP:
+                        print(f"{b['bucket']:<10} | {current_bid:.3f}    | {current_ask:.3f}    | {'-':<8} | {'-':<10} | 🔒 WARMUP")
+                        continue
+                    # ============================================ 
+
+                    # CÁLCULO DE PROBABILIDAD (Solo si NO es warmup)
+                    prob_min = norm.cdf(b['min'], loc=pred_mean, scale=effective_std)
+                    prob_max = norm.cdf(b['max'] + 1, loc=pred_mean, scale=effective_std)
+
+                    fair_val = prob_max - prob_min
+                    
+                    if "+" in b['bucket']: fair_val = 1.0 - prob_min
+                    
+                    # 🛑 FIX ANTI-ESPEJISMOS
+                    if current_ask < 0.001: 
+                        continue 
+
+                    action = "-"; reason = "_"; special_tag = ""
+                    spread = current_ask - current_bid
+                    spread_pct = (spread / current_ask) if current_ask > 0 else 1.0
+                    bad_spread = spread > 0.05 and spread_pct > 0.20
+
+                    # ---------------------------------------------------------
+                    # 👻 FILTRO GLOBAL ANTI-FANTASMAS
+                    # Evita comprar Value o Lotto si el libro está vacío (Ask 0.001 / Bid 0.0)
+                    # ---------------------------------------------------------
+                    is_ghost_market = (current_ask <= 0.005 and current_bid == 0.0)
+                    
+                    if is_ghost_market:
+                        # Si es fantasma, solo permitimos VENDER si ya lo tenemos (por si acaso),
+                        # pero PROHIBIMOS COMPRAR bajo cualquier concepto.
+                        # Forzamos un 'continue' si no tenemos posición que cerrar.
+                        if my_pos_data:
+                            pass # Dejamos pasar para ver si el Smart Exit quiere vender (aunque con bid 0 no podrá)
+                        else:
+                            # Si no tenemos nada, ignoramos este bucket corrupto
+                            continue 
+                    # ---------------------------------------------------------
+                    
+                    # --- LÓGICA DE TRADING ---
+                    # A. VALUE
+                    if action == "-":
+                        is_cheap = (current_ask < 0.05)
+                        ok_spread = (not bad_spread) or is_cheap
+                        if current_ask > 0 and fair_val > (current_ask + 0.15) and ok_spread: 
+                            action = f"🟢 BUY"; diff = fair_val - current_ask; reason = f"Value +{diff:.2f}"
+                        elif current_bid > 0.10 and fair_val < (current_bid - 0.10): 
+                            action = f"🔴 SELL"; diff = current_bid - fair_val; reason = f"Sobreprecio +{diff:.2f}"
+
+                    # B. LOTTO (ANTI-GHOST PATCH 👻)
+                    # Solo entramos si:
+                    # 1. Es un mercado a largo plazo.
+                    # 2. Hay ritmo (Pace > 3.2).
+                    # 3. NO ES UN PRECIO FANTASMA (Bid > 0 requiere contrapartida real).
+                    if action == "-" and is_long_term and pace_status != "🔰 WARMUP":
+                        dist_from_mean = pred_mean - b['max'] 
+                        
+                        # CONDICIONES MEJORADAS
+                        is_deep_otm = dist_from_mean < -120
+                        is_active_market = pace_24h > 3.2
+                        is_ghost_price = (current_ask <= 0.002 and current_bid == 0.0) # <--- EL FILTRO CLAVE
+                        
+                        if is_deep_otm and is_active_market and not is_ghost_price:
+                             # Solo compramos si el precio es razonable pero no "roto"
+                             if 0.001 < current_ask <= 0.005:
+                                action = "🎣 FISH"; reason = "Lotto (Active)"; special_tag = "BUY"
+
+                    # C. SNIPER
+                    if action == "-" and m_poly['hours'] < 1.0:
+                        if 0.75 < current_ask < 0.95 and b['min'] <= pred_mean <= b['max']:
+                             action = "🔫 SNIPER"; reason = "Breakout >0.75 Last Hour"; special_tag = "BUY"
+
+                    # ZOMBIE
+                    if m_poly['hours'] < 6.0 and fair_val < 0.01 and current_bid > 0.02 and action == "-":
+                         action = "💀 DUMP"; reason = "Exit"
+                    
+                    # EXECUTE
+                    if current_ask > 0.01 or fair_val > 0.01 or special_tag or "EXIT" in action:
+                        print(f"{b['bucket']:<10} | {current_bid:.3f}    | {current_ask:.3f}    | {fair_val:.3f}    | {action:<10} | {reason}")
+
+                    if action != "-": 
+                        raw_act = action.split()[1] if " " in action else action
+                        trade_act = special_tag if special_tag else ("SELL" if "DUMP" in action else raw_act)
+                        price = current_ask if "BUY" in trade_act else current_bid
+                        
+                        trade_res = trader.execute(m_poly['title'], b['bucket'], trade_act, price, reason=reason)
+                        
+                        if trade_res: 
+                            print(f"   👉 {trade_res}")
+                            context = {
+                                "predicted_mean": pred_mean,
+                                "predicted_std": effective_std,
+                                "fair_value": fair_val,
+                                "pace_24h": pace_24h,
+                                "hours_left": m_poly['hours'],
+                                "bucket_info": b
+                            }
+                            save_trade_snapshot(trade_act, m_poly['title'], b['bucket'], price, reason, context)
+
+            if clob_data: trader.print_summary(clob_data)
+            if not clob_data: print(".", end="", flush=True)
+            time.sleep(refresh_sleep)
 
         except KeyboardInterrupt: break
-        except Exception:
-            time.sleep(5)
+        except Exception as e: 
+            print(f"Error Loop: {e}"); 
+            log_monitor(f"ERROR: {e}")
+            time.sleep(1)
 
 if __name__ == "__main__":
     run()
