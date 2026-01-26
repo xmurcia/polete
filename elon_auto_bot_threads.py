@@ -564,9 +564,16 @@ def run():
 
                     # VISUALIZACIÓN
                     d_avg = m_poly.get('daily_avg', 0)
+                    hours_left = m_poly.get('hours', 0)
+
+                    # Convertir a Días/Horas
+                    days = int(hours_left // 24)
+                    rem_hours = hours_left % 24
+                    time_str = f"{days}d {rem_hours:.1f}h" if days > 0 else f"{hours_left:.1f}h"
+
                     print("-" * 65)
                     print(f">>> {m_poly['title']}")
-                    print(f"    Tweets: {m_poly['count']} (Avg: {d_avg:.1f}/d) | 🧠 Híbrido: {final_mean:.1f} (σ={eff_std:.1f})")
+                    print(f"    Tweets: {m_poly['count']} (Avg: {d_avg:.1f}/d) | ⏳ Quedan: {time_str} | 🧠 Híbrido: {final_mean:.1f} (σ={eff_std:.1f})")
                     print("-" * 65)
                     print(f"{'BUCKET':<10} | {'BID':<6} | {'ASK':<6} | {'FAIR':<6} | {'Z-SCR':<6} | {'ACTION'}")
 
