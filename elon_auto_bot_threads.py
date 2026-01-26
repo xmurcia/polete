@@ -1,20 +1,16 @@
 import time
 import json
 import os
-import glob
 import requests
 import numpy as np
-import pandas as pd
 import re
 from datetime import datetime, timezone
-from scipy.optimize import minimize
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import dateutil.parser
-from collections import deque
 from scipy.stats import norm
 
 # ==============================================================================
-# CONFIGURACIÓN V11.1 (INFRA V10 + LOGIC V11)
+# CONFIGURACIÓN MAESTRA V11.3
 # ==============================================================================
 LOGS_DIR = 'logs'
 if not os.path.exists(LOGS_DIR): os.makedirs(LOGS_DIR)
@@ -23,38 +19,30 @@ FILES = {
     'portfolio': os.path.join(LOGS_DIR, "portfolio.json"),
     'history': os.path.join(LOGS_DIR, "live_history.json"),
     'trades': os.path.join(LOGS_DIR, "trade_history.csv"),
-    'monitor': os.path.join(LOGS_DIR, "bot_monitor.log"),
-    'snapshots': os.path.join(LOGS_DIR, "snapshots_merged.json"),  # V11 Unificado
-    'market_tape': os.path.join(LOGS_DIR, "market_tape_merged.json") # V11 Unificado
+    'snapshots': os.path.join(LOGS_DIR, "snapshots_merged.json"),   # Dataset IA
+    'market_tape': os.path.join(LOGS_DIR, "market_tape_merged.json") # Dataset Gráficos
 }
-
-# Bio-Ritmos (V10)
-HOURLY_MULTIPLIERS = {
-    0: 0.97, 1: 0.80, 2: 0.42, 3: 0.20, 4: 0.39, 5: 0.48, 6: 2.11, 7: 1.41,
-    8: 1.46, 9: 1.58, 10: 0.44, 11: 0.21, 12: 0.35, 13: 0.49, 14: 1.72, 15: 1.71,
-    16: 1.37, 17: 2.03, 18: 1.34, 19: 1.24, 20: 1.01, 21: 0.89, 22: 0.82, 23: 0.61
-}
-DAILY_MULTIPLIERS = {0: 0.90, 1: 0.75, 2: 1.25, 3: 0.95, 4: 0.95, 5: 1.15, 6: 1.10}
 
 API_CONFIG = {
-    'base_url': "https://xtracker.polymarket.com/api",         # Para Tweets (Xtracker)
-    'gamma_url': "https://gamma-api.polymarket.com/events",    # Para Mercados (Gamma)
-    'clob_url': "https://clob.polymarket.com/prices",          # Para Precios (Bulk)
-    'user': "elonmusk"
+    'base_url': "https://xtracker.polymarket.com/api",
+    'gamma_url': "https://gamma-api.polymarket.com/events",
+    'clob_url': "https://clob.polymarket.com/prices",
+    'user': "elonmusk",
+    'headers': {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36"}
 }
 
-# --- PARÁMETROS V11 ---
-MAX_Z_SCORE_ENTRY = 1.6
-MIN_PRICE_ENTRY = 0.02
-ENABLE_CLUSTERING = True
-CLUSTER_RANGE = 40
-MARKET_WEIGHT = 0.30
+# --- PARÁMETROS DE ESTRATEGIA (SNIPER) ---
+MAX_Z_SCORE_ENTRY = 1.6   # Límite de riesgo para entrar
+MIN_PRICE_ENTRY = 0.02    # Precio suelo
+ENABLE_CLUSTERING = True  # Solo comprar vecinos
+CLUSTER_RANGE = 40        # Rango de vecindad
+MARKET_WEIGHT = 0.30      # Peso del consenso de mercado vs modelo propio
 
 # ==============================================================================
-# 🛠️ UTILIDADES V11
+# 🛠️ UTILIDADES DE SISTEMA
 # ==============================================================================
 def append_to_json_file(filename, new_record):
-    """Guarda en JSON Array unificado (V11 Requirement)"""
+    """Escritura atómica segura para logs unificados"""
     data_list = []
     if os.path.exists(filename):
         try:
@@ -67,14 +55,17 @@ def append_to_json_file(filename, new_record):
     
     data_list.append(new_record)
     
-    # Guardado atómico seguro
+    # Write temp then rename to avoid corruption
     temp_file = filename + ".tmp"
-    with open(temp_file, 'w') as f:
-        json.dump(data_list, f, indent=2)
-    os.replace(temp_file, filename)
+    try:
+        with open(temp_file, 'w') as f:
+            json.dump(data_list, f, indent=2)
+        os.replace(temp_file, filename)
+    except Exception as e:
+        print(f"❌ Error escribiendo {filename}: {e}")
 
 def titles_match_paranoid(tracker_title, market_title):
-    """V11: Comparación de títulos anti-bug (Ignora años 2025/2026)"""
+    """Evita el bug de años (2025 vs 2026) comparando números"""
     t1 = tracker_title.lower()
     t2 = market_title.lower()
     if t1 in t2 or t2 in t1: return True
@@ -86,27 +77,16 @@ def titles_match_paranoid(tracker_title, market_title):
     nums2 = get_nums(t2)
     return len(nums1.intersection(nums2)) >= 2
 
-def log_monitor(message, force_print=False):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] {message}"
-    try:
-        with open(FILES['monitor'], "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except: pass
-    if force_print: print(line)
-
 # ==============================================================================
-# 🧠 CEREBRO HAWKES (V11 UPGRADED)
+# 🧠 CEREBRO V11: HAWKES PROCESS + HYBRID CONSENSUS
 # ==============================================================================
 class HawkesBrain:
     def __init__(self):
-        self.params = {'mu': 0.4, 'alpha': 3.0, 'beta': 4.0}
-        self.timestamps = []
-        # Aquí podrías cargar datos históricos si tienes CSVs, 
-        # para simplificar usamos parámetros por defecto robustos.
+        # Parámetros calibrados para Elon
+        self.params = {'mu': 0.4, 'alpha': 3.0, 'beta': 4.0} 
 
     def get_market_consensus(self, m_poly, clob_buckets):
-        """V11: Calcula la media que el mercado está pagando"""
+        """Calcula qué opina el mercado basado en el precio ponderado"""
         sum_prod = 0; sum_w = 0
         for b in clob_buckets:
             try:
@@ -126,49 +106,56 @@ class HawkesBrain:
         
         return (sum_prod / sum_w) if sum_w > 0 else None
 
-    def predict(self, history_ms, hours):
+    def predict(self, history_ts, hours_left):
+        """Simulación Monte Carlo simplificada con proceso Hawkes"""
         mu, a, b = self.params.values()
         boost = 0
         
-        # Excitación reciente
-        if history_ms:
-            last_ts_sec = history_ms[-1] / 1000.0
-            current_time_sec = time.time()
-            cutoff = 10.0 / b
+        # 1. Calcular excitación actual basada en historial reciente
+        if history_ts:
+            last_ts = history_ts[-1]
+            now = time.time()
+            cutoff = 10.0 / b # Ignorar tweets muy viejos para el boost
             
-            for t_ms in reversed(history_ms):
-                t_sec = t_ms / 1000.0
-                dt = current_time_sec - t_sec
-                if dt > cutoff * 3600: break
-                if dt < 0: dt = 0
-                boost += a * np.exp(-b * (dt / 3600.0))
+            for t_ts in reversed(history_ts):
+                age_sec = now - t_ts
+                if age_sec > cutoff * 3600: break
+                if age_sec < 0: age_sec = 0
+                boost += a * np.exp(-b * (age_sec / 3600.0))
         
+        # 2. Simular futuro (Monte Carlo rápido)
         sims = []
-        # Monte Carlo rápido
-        for _ in range(500):
+        for _ in range(500): # 500 escenarios
             t, l_boost, ev = 0, boost, 0
-            while t < hours:
+            while t < hours_left:
                 l_max = mu + l_boost
                 if l_max <= 0: l_max = 0.001
+                # Adelantar tiempo (Thinning algorithm)
                 w = -np.log(np.random.uniform()) / l_max
                 t += w
-                if t >= hours: break
+                if t >= hours_left: break
+                
+                # Decaer boost
                 l_boost *= np.exp(-b * w)
+                
+                # Aceptar/Rechazar evento
                 if np.random.uniform() < (mu + l_boost)/l_max:
                     ev += 1; l_boost += a
             sims.append(ev)
-        return sims
+        
+        # Retornar media y desviación de las simulaciones
+        return np.mean(sims), np.std(sims)
 
 # ==============================================================================
-# 📡 SENSOR POLYMARKET (V10: XTRACKER + GAMMA)
+# 📡 SENSOR POLYMARKET (XTRACKER API)
 # ==============================================================================
-class PolymarketSensor: # XTRACKER (Tweets Count)
+class PolymarketSensor:
     def __init__(self):
         self.s = requests.Session()
-        self.s.headers.update({"User-Agent": "Mozilla/5.0"})
+        self.s.headers.update(API_CONFIG['headers'])
 
     def get_active_counts(self):
-        # Usamos el endpoint de USUARIO que sí funciona
+        """Obtiene conteo real de tweets desde Xtracker (/users/elonmusk)"""
         url = f"{API_CONFIG['base_url']}/users/{API_CONFIG['user']}"
         try:
             r = self.s.get(url, timeout=10).json()
@@ -177,29 +164,24 @@ class PolymarketSensor: # XTRACKER (Tweets Count)
             res = []
             now = datetime.now(timezone.utc)
             
-            # Procesamos en paralelo para velocidad
             def process_tracking(t):
                 if not t.get('startDate') or not t.get('endDate'): return None
                 try:
                     end = dateutil.parser.isoparse(t['endDate'])
-                    # Filtro de fecha
-                    if now.timestamp() > (end.timestamp() + 43200): return None # +12h margen
+                    # Filtro: Solo eventos futuros o recientes (+12h margen)
+                    if now.timestamp() > (end.timestamp() + 43200): return None 
                     
-                    # Detalle para obtener stats reales
-                    det = self.s.get(f"{API_CONFIG['base_url']}/trackings/{t['id']}?includeStats=true", timeout=5).json()
+                    # Llamada detalle para obtener stats
+                    det_url = f"{API_CONFIG['base_url']}/trackings/{t['id']}?includeStats=true"
+                    det = self.s.get(det_url, timeout=5).json()
                     d = det.get('data', {})
                     count = d.get('stats', {}).get('total', 0)
-                    days = d.get('stats', {}).get('daysElapsed', 1)
                     
-                    # Fix horario final
+                    # Calcular horas restantes (hasta las 17:00 UTC aprox)
                     fixed_end = end.replace(hour=17, minute=0, second=0, tzinfo=timezone.utc)
                     hours = (fixed_end - now).total_seconds() / 3600.0
                     
-                    return {
-                        'id': t['id'], 'title': t['title'], 
-                        'count': count, 'hours': hours,
-                        'daily_avg': count/days if days > 0 else 0
-                    }
+                    return {'id': t['id'], 'title': t['title'], 'count': count, 'hours': hours}
                 except: return None
 
             with ThreadPoolExecutor(max_workers=5) as ex:
@@ -208,18 +190,21 @@ class PolymarketSensor: # XTRACKER (Tweets Count)
                     if f.result(): res.append(f.result())
             return res
         except Exception as e:
-            print(f"❌ Error Xtracker: {e}")
+            print(f"❌ Error Xtracker Sensor: {e}")
             return []
 
-class ClobMarketScanner: # GAMMA + BULK (Precios)
+# ==============================================================================
+# 🔎 CLOB SCANNER (PRECIOS GAMMA/BULK)
+# ==============================================================================
+class ClobMarketScanner:
     def __init__(self):
         self.s = requests.Session()
-        self.bulk_url = API_CONFIG['clob_url']
+        self.s.headers.update(API_CONFIG['headers'])
 
     def get_market_prices(self):
-        print("   🔎 Escaneando Precios...", end=" ")
+        """Descarga estructura de mercados y precios en bloque"""
         try:
-            # 1. Traer Mercados de Gamma
+            # 1. Obtener Mercados (Gamma)
             params = {"limit": 100, "active": "true", "closed": "false", "archived": "false", "order": "volume24hr", "ascending": "false"}
             data = self.s.get(API_CONFIG['gamma_url'], params=params, timeout=5).json()
             
@@ -227,42 +212,42 @@ class ClobMarketScanner: # GAMMA + BULK (Precios)
             tokens = []
             
             for e in data:
+                # Filtro Título Básico
                 if "elon" not in e.get('title','').lower() or "tweets" not in e.get('title','').lower(): continue
+                
                 buckets = []
                 for m in e.get('markets', []):
-                    # Filtro Fecha Gamma (Doble check)
-                    if m.get('endDate'):
-                        try:
-                            ed = dateutil.parser.isoparse(m['endDate']).replace(tzinfo=timezone.utc)
-                            if datetime.now(timezone.utc) > ed: continue
-                        except: pass
-                    
-                    # Parsear Bucket
+                    # Parsear Bucket del título de la pregunta
                     q = m.get('question', '')
-                    r = re.search(r'(\d+)-(\d+)', q); o = re.search(r'(\d+)\+', q)
+                    r = re.search(r'(\d+)-(\d+)', q)
+                    o = re.search(r'(\d+)\+', q)
+                    
                     if r: b_name, min_v, max_v = f"{r.group(1)}-{r.group(2)}", int(r.group(1)), int(r.group(2))
                     elif o: b_name, min_v, max_v = f"{o.group(1)}+", int(o.group(1)), 99999
                     else: continue
                     
                     try:
-                        tid = json.loads(m['clobTokenIds'])[0]
+                        tid = json.loads(m['clobTokenIds'])[0] # Token ID para precio
                         buckets.append({'bucket': b_name, 'min': min_v, 'max': max_v, 'token': tid})
-                        tokens.append({"token_id": tid, "side": "BUY"})
-                        tokens.append({"token_id": tid, "side": "SELL"})
+                        tokens.append({"token_id": tid, "side": "BUY"})  # Queremos saber el Bid
+                        tokens.append({"token_id": tid, "side": "SELL"}) # Queremos saber el Ask
                     except: continue
                 
                 if buckets:
                     buckets.sort(key=lambda x: x['min'])
                     structure.append({'title': e['title'], 'buckets': buckets})
 
-            # 2. Bulk Price Fetch
+            # 2. Descargar Precios (Bulk CLOB)
             price_map = {}
             if tokens:
-                bulk = self.s.post(self.bulk_url, json=tokens, timeout=5).json()
+                bulk = self.s.post(API_CONFIG['clob_url'], json=tokens, timeout=5).json()
                 for tid, p in bulk.items():
-                    price_map[tid] = {'bid': float(p.get('BUY',0) or 0), 'ask': float(p.get('SELL',0) or 0)}
+                    price_map[tid] = {
+                        'bid': float(p.get('BUY', 0) or 0), 
+                        'ask': float(p.get('SELL', 0) or 0)
+                    }
 
-            # 3. Ensamblar
+            # 3. Fusionar
             final = []
             for s in structure:
                 clean_b = []
@@ -271,17 +256,13 @@ class ClobMarketScanner: # GAMMA + BULK (Precios)
                     clean_b.append({**b, **p})
                 final.append({'title': s['title'], 'buckets': clean_b})
             
-            print("✅")
             return final
         except Exception as e:
-            print(f"❌ Error Scanner: {e}")
+            print(f"❌ Error Clob Scanner: {e}")
             return []
 
 # ==============================================================================
-# 💼 PAPER TRADER (V11 COMPATIBLE)
-# ==============================================================================
-# ==============================================================================
-# 💼 PAPER TRADER (V11.1 + VISUAL LOGS V10)
+# 💼 PAPER TRADER (VISUAL + LOGIC V11)
 # ==============================================================================
 class PaperTrader:
     def __init__(self):
@@ -298,6 +279,7 @@ class PaperTrader:
         with open(FILES['portfolio'], 'w') as f: json.dump(self.portfolio, f, indent=4)
 
     def get_owned_buckets_val(self, market_title):
+        """Retorna los puntos medios de los buckets que ya tenemos (para Clustering)"""
         vals = []
         for k, v in self.portfolio['positions'].items():
             if v['market'] == market_title:
@@ -311,15 +293,17 @@ class PaperTrader:
         return vals
 
     def execute(self, action, market, bucket, price, shares, reason, context):
+        """Ejecuta orden, actualiza portfolio y guarda snapshot"""
         pos_key = f"{market} | {bucket}"
         
+        # --- Lógica Contable ---
         if action == "BUY":
             cost = shares * price
             if self.portfolio['cash'] < cost: return None
             self.portfolio['cash'] -= cost
             self.portfolio['positions'][pos_key] = {
                 'market': market, 'bucket': bucket, 
-                'shares': shares, 'entry_price': price, 'avg_price': price
+                'shares': shares, 'entry_price': price
             }
         
         elif action in ["SELL", "ROTATE", "TAKE_PROFIT"]:
@@ -337,7 +321,7 @@ class PaperTrader:
 
         self.save()
         
-        # Log Snapshot V11
+        # --- Log Snapshot (IA) ---
         snap = {
             'timestamp': time.time(),
             'readable_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -354,9 +338,8 @@ class PaperTrader:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             f.write(f"{ts},{action},{market},{bucket},{price:.3f},{shares:.1f},{reason},{pnl:.2f},{self.portfolio['cash']:.2f}\n")
 
-    # --- AQUÍ ESTÁ LA MAGIA VISUAL RECUPERADA ---
+    # --- Visualización Tabular (V10 Style) ---
     def print_market_summary(self, market_title, stats_ctx, buckets_data, decisions):
-        """Imprime la tabla bonita de la V10"""
         print("-" * 75)
         print(f">>> {market_title}")
         print(f"    📊 Act: {stats_ctx['count']} | 🧠 Gauss: μ={stats_ctx['mean']:.1f} σ={stats_ctx['std']:.1f} | ⏳ Quedan: {stats_ctx['hours']:.1f}h")
@@ -364,18 +347,16 @@ class PaperTrader:
         print(f"{'BUCKET':<10} | {'BID':<6} | {'ASK':<6} | {'FAIR':<6} | {'Z-SCR':<5} | {'ACCIÓN':<10} | {'MOTIVO'}")
         
         for b in buckets_data:
-            # Buscar decisión si existe
+            # Buscar si hubo decisión en este ciclo
             act = "-"
             reason = "_"
             for d in decisions:
                 if d['bucket'] == b['bucket']:
-                    act = d['action']
-                    reason = d['reason']
-                    # Colores simples para consola
+                    act = d['action']; reason = d['reason']
                     if "BUY" in act: act = f"🟢 {act}"
                     if "SELL" in act or "ROTATE" in act: act = f"🔴 {act}"
             
-            # Calcular Z-Score para visualización
+            # Recalcular Z para display
             try:
                 if "+" in b['bucket']: mid = int(re.search(r'\d+', b['bucket']).group()) + 20
                 else: 
@@ -392,54 +373,49 @@ class PaperTrader:
         print("\n💼 --- PORTFOLIO (SIMULADO) ---")
         print(f"   {'FECHAS EVENTO':<30} | {'BUCKET':<10} | {'ENTRADA':<8} | {'SHARES':<8}")
         print("   " + "-"*65)
-        
         total_equity = self.portfolio['cash']
         for k, v in self.portfolio['positions'].items():
-            short_market = v['market'].replace("Elon Musk # tweets ", "")[:30]
-            print(f"   🔹 {short_market:<30} | {v['bucket']:<10} | ${v['entry_price']:.3f}   | {v['shares']:.1f}")
-            # Estimación simple de valor actual (requeriría precio real)
-            total_equity += (v['shares'] * v['entry_price']) 
-
+            short_m = v['market'].replace("Elon Musk # tweets ", "")[:30]
+            print(f"   🔹 {short_m:<30} | {v['bucket']:<10} | ${v['entry_price']:.3f}   | {v['shares']:.1f}")
+            total_equity += (v['shares'] * v['entry_price']) # Aprox equity
         print("   " + "-"*65)
         print(f"   💵 Cash: ${self.portfolio['cash']:.2f} | 📈 Equity Est: ${total_equity:.2f}")
         print("-" * 75)
 
 # ==============================================================================
-# 🚀 EJECUCIÓN V11.1
+# 🚀 EJECUCIÓN PRINCIPAL
 # ==============================================================================
 def run():
-    print("🤖 ELON BOT V11.2 [HYBRID REAL + TWEET RECORDER]")
+    print("🤖 ELON BOT V11.3 [STABLE: HYBRID + RECORDER + SNIPER]")
     
     # Inicialización
     brain = HawkesBrain()
-    sensor = PolymarketSensor() # Xtracker
-    pricer = ClobMarketScanner() # Gamma
+    sensor = PolymarketSensor()
+    pricer = ClobMarketScanner()
     trader = PaperTrader()
     
-    # Cargar Historial
+    # 1. Cargar Historial (Robust Loading)
     last_tweets = []
     if os.path.exists(FILES['history']):
         try:
             with open(FILES['history']) as f: 
                 data = json.load(f)
-                # Soporte para lista de objetos o lista plana
-                if data and isinstance(data[0], dict):
-                    last_tweets = [e['timestamp'] for e in data]
-                else:
-                    last_tweets = data
+                if data:
+                    if isinstance(data[0], dict): last_tweets = [e['timestamp'] for e in data]
+                    else: last_tweets = data
             print(f"📂 Historial cargado: {len(last_tweets)} tweets.")
         except Exception as e:
             print(f"⚠️ Error cargando historial: {e}")
 
     # Variables de Control
-    REFRESH_RATE = 3
-    last_known_counts = {} # Para detectar cambios: {market_id: count}
+    REFRESH_RATE = 6  # Velocidad de Escaneo (Segundos)
+    last_known_counts = {} 
 
     while True:
         try:
             start_time = time.time()
             
-            # 1. Obtener Datos
+            # --- FASE 1: DATOS ---
             markets_xtracker = sensor.get_active_counts()
             clob_data = pricer.get_market_prices()
             
@@ -448,18 +424,18 @@ def run():
                 time.sleep(REFRESH_RATE)
                 continue
 
-            # ⚡ DETECTOR DE TWEETS & GRABADO (NUEVO)
-            # Ordenamos por count descendente para usar el mercado más activo como "Maestro"
+            # --- FASE 2: DETECTOR DE TWEETS & GRABADO ---
+            # Usamos el mercado con más tweets como referencia maestra
             markets_xtracker.sort(key=lambda x: x['count'], reverse=True)
             master_m = markets_xtracker[0]
             master_id = master_m['id']
             current_count = master_m['count']
             
-            # Inicializar tracking si es la primera vez
+            # Inicialización silenciosa (Primera vez que vemos el mercado)
             if master_id not in last_known_counts:
                 last_known_counts[master_id] = current_count
             
-            # Detectar cambio
+            # Detección de cambio
             delta = current_count - last_known_counts[master_id]
             if delta > 0:
                 print(f"\n🐦 ¡NUEVO TWEET DETECTADO! (+{delta})")
@@ -468,54 +444,51 @@ def run():
                 # Añadir timestamps y Guardar
                 for _ in range(int(delta)): last_tweets.append(now_ts)
                 
-                # Guardado Seguro
                 try:
                     with open(FILES['history'], 'w') as f:
-                        # Guardamos formato compatible lista de objetos
                         json.dump([{'timestamp': t} for t in last_tweets], f, indent=2)
-                    print(f"💾 Historial actualizado: {len(last_tweets)} tweets.")
-                except Exception as e:
-                    print(f"❌ Error guardando historial: {e}")
+                    print(f"💾 Historial actualizado: {len(last_tweets)} tweets total.")
+                except Exception as e: print(f"❌ Error guardando historial: {e}")
                 
-                # Actualizar referencia
                 last_known_counts[master_id] = current_count
 
-            # Warmup Check
+            # Warmup Check (Automático)
             IS_WARMUP = len(last_tweets) < 5
             
-            # 2. Bucle de Mercados (Trading)
+            # --- FASE 3: BUCLE DE MERCADOS ---
             for m_poly in markets_xtracker:
                 m_title = m_poly['title']
                 
-                # Match Paranoico de Títulos
+                # Match Títulos Paranoico
                 m_clob = next((c for c in clob_data if titles_match_paranoid(m_title, c['title'])), None)
                 if not m_clob: continue
                 
-                # Grabar Tape
+                # Grabar Tape (Vital para gráficos)
                 tape_rec = {'timestamp': time.time(), 'market': m_title, 'buckets': m_clob['buckets']}
                 append_to_json_file(FILES['market_tape'], tape_rec)
 
-                # 3. Predicciones V11
-                pred_sims = brain.predict(last_tweets, m_poly['hours'])
-                pred_sims_val = [s * 1.0 for s in pred_sims] 
-                final_sims = np.array([m_poly['count'] + s for s in pred_sims_val])
+                # --- FASE 4: CEREBRO HIBRIDO V11 ---
+                # A. Predicción Modelo
+                pred_val, pred_std_raw = brain.predict(last_tweets, m_poly['hours'])
+                # Factor estacional simple: si es de día (UTC 8-22), asumimos ritmo normal
+                final_sim_mean = m_poly['count'] + pred_val
                 
-                pred_mean = np.mean(final_sims)
-                pred_std = np.std(final_sims)
-                if pred_std < 5: pred_std = 5.0
+                if pred_std_raw < 5: pred_std_raw = 5.0 # Suelo
                 
-                # Consenso Híbrido
+                # B. Consenso Mercado
                 mkt_consensus = brain.get_market_consensus(m_poly, m_clob['buckets'])
-                if mkt_consensus:
-                    combined_mean = (pred_mean * (1 - MARKET_WEIGHT)) + (mkt_consensus * MARKET_WEIGHT)
-                    effective_std = max(pred_std + (abs(pred_mean - mkt_consensus)/4), 5.0)
-                else:
-                    combined_mean = pred_mean
-                    effective_std = pred_std
-
-                stats_ctx = {"count": m_poly['count'], "mean": combined_mean, "std": effective_std, "hours": m_poly['hours']}
                 
-                # 4. MOTOR DE DECISIÓN
+                # C. Fusión
+                if mkt_consensus:
+                    combined_mean = (final_sim_mean * (1 - MARKET_WEIGHT)) + (mkt_consensus * MARKET_WEIGHT)
+                    conflict = abs(final_sim_mean - mkt_consensus)
+                    effective_std = max(pred_std_raw + (conflict/4), 5.0)
+                else:
+                    combined_mean = final_sim_mean
+                    effective_std = pred_std_raw
+
+                # --- FASE 5: MOTOR DE DECISIÓN ---
+                stats_ctx = {"count": m_poly['count'], "mean": combined_mean, "std": effective_std, "hours": m_poly['hours']}
                 my_buckets = trader.get_owned_buckets_val(m_title)
                 decisions_log = []
                 
@@ -527,7 +500,7 @@ def run():
                     if "+" in b['bucket']: fair = 1.0 - p_min
                     b['fair'] = fair 
 
-                # Análisis de Buckets
+                # Análisis individual
                 for b in m_clob['buckets']:
                     bid = b['bid']; ask = b['ask']; fair = b['fair']
                     b_mid = (b['min'] + b['max']) / 2
@@ -535,18 +508,15 @@ def run():
                     
                     pos_key = f"{m_title} | {b['bucket']}"
                     has_pos = pos_key in trader.portfolio['positions']
-                    
                     context = {"combined_mean": combined_mean, "z_score": z_score, "fair": fair, "hours": m_poly['hours']}
 
-                    # A. COMPRA
+                    # Lógica de Compra
                     if not has_pos and not IS_WARMUP:
-                        # Filtros V11
                         if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
                             is_cluster_ok = True
                             if ENABLE_CLUSTERING and my_buckets:
                                 is_cluster_ok = any(abs(b_mid - ov) <= CLUSTER_RANGE for ov in my_buckets)
                             
-                            # Value Trigger
                             if is_cluster_ok and fair > (ask + 0.15):
                                 shares = min(trader.portfolio['cash'] / ask, 500)
                                 if shares > 10:
@@ -554,7 +524,7 @@ def run():
                                     trader.execute("BUY", m_title, b['bucket'], ask, shares, reason, context)
                                     decisions_log.append({'bucket': b['bucket'], 'action': 'BUY', 'reason': reason})
 
-                    # B. VENTA
+                    # Lógica de Venta
                     elif has_pos:
                         pos = trader.portfolio['positions'][pos_key]
                         entry = pos['entry_price']
@@ -569,13 +539,12 @@ def run():
                             trader.execute("TAKE_PROFIT", m_title, b['bucket'], bid, pos['shares'], reason, context)
                             decisions_log.append({'bucket': b['bucket'], 'action': 'PROFIT', 'reason': reason})
                 
-                # Imprimir Tabla
+                # Output Visual
                 trader.print_market_summary(m_title, stats_ctx, m_clob['buckets'], decisions_log)
 
-            # Imprimir Portfolio
             trader.print_portfolio_summary()
             
-            # Control de Tiempos
+            # Control Velocidad
             elapsed = time.time() - start_time
             sleep_time = max(0.1, REFRESH_RATE - elapsed)
             print(f"⏱️ Scan took {elapsed:.2f}s | Sleeping {sleep_time:.1f}s... (Tweets: {len(last_tweets)})", end="\r")
