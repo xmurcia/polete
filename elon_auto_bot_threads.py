@@ -456,16 +456,10 @@ class MarketPanicSensor:
         return alerts
 
 # ==========================================
-# 6. DIRECTOR (V10 ESTRUCTURA + V11 LÓGICA)
-# ==========================================
-# ==========================================
-# 6. DIRECTOR (V12.2 - FULL VISIBILITY)
-# ==========================================
-# ==========================================
-# 6. DIRECTOR (V12.6 - FINAL MATH FIX)
+# 6. DIRECTOR (V12.7 - REALITY CHECK & DYNAMIC STD)
 # ==========================================
 def run():
-    print("\n🤖 ELON-BOT V12.6 (MATH FIX: INFINITY BUCKETS)")
+    print("\n🤖 ELON-BOT V12.7 (REALITY CHECK ACTIVATED)")
     
     # Utiles V10
     def log_monitor(msg):
@@ -564,7 +558,14 @@ def run():
                     if consensus > 0:
                         final_mean = (pred_mean_hawkes * (1-MARKET_WEIGHT)) + (consensus * MARKET_WEIGHT)
                     
-                    eff_std = max(np.std(base_sims), 5.0)
+                    # --- FIX 1: SIGMA DINÁMICA ---
+                    # Si queda poco tiempo, permitimos que la sigma sea pequeña (precisión)
+                    # Si queda mucho, mantenemos el suelo de 5.0 (incertidumbre)
+                    if m_poly['hours'] < 2.0:
+                        std_floor = 0.5 
+                    else:
+                        std_floor = 5.0
+                    eff_std = max(np.std(base_sims), std_floor)
 
                     # VISUALIZACIÓN
                     d_avg = m_poly.get('daily_avg', 0)
@@ -632,15 +633,26 @@ def run():
                                     if res: save_trade_snapshot("PROFIT", m_poly['title'], b['bucket'], bid, reason, {"profit": profit_pct})
 
                         elif not owned and not IS_WARMUP:
-                            if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
-                                is_neighbor = True
-                                if ENABLE_CLUSTERING and my_buckets:
-                                    is_neighbor = any(abs(mid - ov) <= CLUSTER_RANGE for ov in my_buckets)
-                                
-                                if is_neighbor and fair > (ask + 0.15):
-                                    action = "BUY"; reason = f"Val+{fair-ask:.2f}"
-                                    res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
-                                    if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
+                            # --- FIX 2: REALITY CHECK (FILTRO FÍSICO) ---
+                            # Si queda menos de 1 hora, calculamos si es humanamente posible llegar
+                            is_impossible = False
+                            if m_poly['hours'] < 1.0:
+                                tweets_needed = b['min'] - m_poly['count']
+                                # Si necesita más de 15 tweets/hora, asumimos imposible
+                                if tweets_needed > (m_poly['hours'] * 15): 
+                                    is_impossible = True
+                                    reason = "Impossible Pace" # Para debug si lo imprimiéramos
+
+                            if not is_impossible:
+                                if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
+                                    is_neighbor = True
+                                    if ENABLE_CLUSTERING and my_buckets:
+                                        is_neighbor = any(abs(mid - ov) <= CLUSTER_RANGE for ov in my_buckets)
+                                    
+                                    if is_neighbor and fair > (ask + 0.15):
+                                        action = "BUY"; reason = f"Val+{fair-ask:.2f}"
+                                        res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
+                                        if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
 
                         # PRINT INCONDICIONAL (SIN FILTROS)
                         color_act = f"🟢 {action}" if "BUY" in action else (f"🔴 {action}" if "ROTATE" in action or "PROFIT" in action else "-")
