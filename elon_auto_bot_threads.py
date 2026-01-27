@@ -455,12 +455,11 @@ class MarketPanicSensor:
                         alerts.append({'type': 'DUMP', 'market_title': m['title'], 'bucket': b['bucket'], 'price': b['bid'], 'min': b.get('min',0)})
         return alerts
 
-
 # ==========================================
-# 6. DIRECTOR (V12.10 - SMART ROTATION)
+# 6. DIRECTOR (V12.13 - PARANOID TREASURE MODE)
 # ==========================================
 def run():
-    print("\n🤖 ELON-BOT V12.10 (SMART ROTATION MODE)")
+    print("\n🤖 ELON-BOT V12.13 (PARANOID TREASURE MODE)")
     
     # Utiles V10
     def log_monitor(msg):
@@ -559,18 +558,13 @@ def run():
                     if consensus > 0:
                         final_mean = (pred_mean_hawkes * (1-MARKET_WEIGHT)) + (consensus * MARKET_WEIGHT)
                     
-                    # --- FIX 1: SIGMA DINÁMICA ---
-                    if m_poly['hours'] < 2.0:
-                        std_floor = 0.5 
-                    else:
-                        std_floor = 5.0
+                    # FIX 1: SIGMA DINÁMICA
+                    if m_poly['hours'] < 2.0: std_floor = 0.5 
+                    else: std_floor = 5.0
                     eff_std = max(np.std(base_sims), std_floor)
 
-                    # VISUALIZACIÓN
                     d_avg = m_poly.get('daily_avg', 0)
                     hours_left = m_poly.get('hours', 0)
-
-                    # Convertir a Días/Horas
                     days = int(hours_left // 24)
                     rem_hours = hours_left % 24
                     time_str = f"{days}d {rem_hours:.1f}h" if days > 0 else f"{hours_left:.1f}h"
@@ -610,23 +604,32 @@ def run():
                                 entry = pos_data['entry_price']
                                 profit_pct = (bid - entry) / entry if entry > 0 else 0
                                 
-                                # 1. Venta de Emergencia (Z-Score Roto)
-                                if z_score > 2.0:
-                                    action = "ROTATE"; reason = f"Z-Score {z_score:.1f}"
-                                    res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
-                                    if res: save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score})
+                                # --- LÓGICA V12.13 (PARANOID TREASURE) ---
                                 
-                                # 2. Take Profit (Ganancia sólida)
-                                elif profit_pct > 0.30 and z_score > 1.8:
-                                    action = "TAKE_PROFIT"; reason = f"Profit +{profit_pct*100:.0f}%"
-                                    res = trader.execute(m_poly['title'], b['bucket'], "TAKE_PROFIT", bid, reason)
-                                    if res: save_trade_snapshot("PROFIT", m_poly['title'], b['bucket'], bid, reason, {"profit": profit_pct})
+                                should_sell = False
+                                sell_reason = ""
 
-                                # 3. ### NUEVO: SMART ROTATION (V12.10) ###
-                                # Si estamos perdiendo tracción (-15% de profit) Y el Z-Score se aleja de la zona ideal (> 1.3)
-                                # Vendemos ANTES de llegar al límite de 2.0 para salvar capital y saltar al siguiente.
+                                # 1. TESORO PARANOICO (>100% Ganancia)
+                                # Bajamos el Z-Score permitido a 0.6 (antes 0.9).
+                                # Esto significa: "Si no eres el bucket FAVORITO ABSOLUTO, véndelo ya".
+                                if profit_pct > 1.0 and z_score > 0.6:
+                                    should_sell = True; sell_reason = "Paranoid Treasure Protection"
+
+                                # 2. PROTECCIÓN DE BENEFICIO (>0% Ganancia)
+                                # Si vamos ganando algo, no dejamos que el Z-Score pase de 1.3
+                                elif profit_pct > 0.0 and z_score > 1.3:
+                                    should_sell = True; sell_reason = "Protect Profit"
+
+                                # 3. STOP LOSS (< -15%)
                                 elif profit_pct < -0.15 and z_score > 1.3:
-                                    action = "SMART_ROTATE"; reason = f"Trend Change Z{z_score:.1f}"
+                                    should_sell = True; sell_reason = "Stop Loss"
+                                
+                                # 4. PÁNICO GLOBAL
+                                elif z_score > 2.0:
+                                    should_sell = True; sell_reason = "Panic Exit"
+
+                                if should_sell:
+                                    action = "SMART_ROTATE"; reason = f"{sell_reason} Z{z_score:.1f}"
                                     res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
                                     if res: save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
 
@@ -635,8 +638,7 @@ def run():
                             is_impossible = False
                             if m_poly['hours'] < 1.0:
                                 tweets_needed = b['min'] - m_poly['count']
-                                if tweets_needed > (m_poly['hours'] * 15): 
-                                    is_impossible = True
+                                if tweets_needed > (m_poly['hours'] * 15): is_impossible = True
 
                             if not is_impossible:
                                 if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
@@ -644,7 +646,6 @@ def run():
                                     if ENABLE_CLUSTERING and my_buckets:
                                         is_neighbor = any(abs(mid - ov) <= CLUSTER_RANGE for ov in my_buckets)
                                     
-                                    # Umbral V12.8 (0.05)
                                     edge = fair - ask
                                     if is_neighbor and edge > 0.05:
                                         action = "BUY"; reason = f"Val+{edge:.2f}"
