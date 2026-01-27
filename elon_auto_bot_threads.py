@@ -625,9 +625,14 @@ def run():
                                 if bucket_headroom < safety_threshold and bucket_headroom >= 0 and profit_pct > 0:
                                     should_sell = True; sell_reason = f"Proximity Danger ({bucket_headroom} left)"
 
-                                # 2. TESORO PARANOICO (>100% Ganancia)
-                                elif profit_pct > 1.0 and z_score > 0.6:
-                                    should_sell = True; sell_reason = "Paranoid Treasure"
+                                # 2. TESORO PARANOICO
+                                # Ajusta el umbral de ganancia (profit_pct) y la tolerancia (z_score)
+                                # OPCIÓN CONSERVADORA (La actual): > 1.0 (100%)
+                                # OPCIÓN EQUILIBRADA (Recomendada): > 1.5 (150%)
+                                # OPCIÓN AGRESIVA: > 2.0 (200%)
+                                # Y recuerda el Z-Score: 0.9 es el equilibrio.
+                                elif profit_pct > 1.5 and z_score > 0.9:  # <--- Aquí he puesto 1.5 (150%)
+                                    should_sell = True; sell_reason = "Paranoid Treasure (>150%)"
 
                                 # 3. PROTECCIÓN DE BENEFICIO NORMAL (>0% Ganancia)
                                 elif profit_pct > 0.0 and z_score > 1.3:
