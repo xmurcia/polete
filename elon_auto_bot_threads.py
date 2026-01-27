@@ -457,10 +457,10 @@ class MarketPanicSensor:
 
 
 # ==========================================
-# 6. DIRECTOR (V12.8 - ACTIVE SNIPER MODE)
+# 6. DIRECTOR (V12.10 - SMART ROTATION)
 # ==========================================
 def run():
-    print("\n🤖 ELON-BOT V12.8 (ACTIVE SNIPER MODE)")
+    print("\n🤖 ELON-BOT V12.10 (SMART ROTATION MODE)")
     
     # Utiles V10
     def log_monitor(msg):
@@ -584,27 +584,18 @@ def run():
                     my_buckets = trader.get_owned_buckets_val(m_poly['title'])
 
                     for b in m_clob['buckets']:
-                        # Solo filtramos los buckets que YA HAN PASADO matemáticamente
                         if b['max'] < m_poly['count']: continue 
                         
                         bid, ask = b.get('bid',0), b.get('ask',0)
                         
-                        # --- FIX MATEMÁTICO (Z-SCORE INFINITO) ---
-                        if b['max'] >= 99999:
-                            mid = b['min'] + 20
-                        else:
-                            mid = (b['min'] + b['max']) / 2
+                        if b['max'] >= 99999: mid = b['min'] + 20
+                        else: mid = (b['min'] + b['max']) / 2
                         
-                        # Math
                         z_score = abs(mid - final_mean) / eff_std
                         p_min = norm.cdf(b['min'], final_mean, eff_std)
                         
-                        # Cálculo de probabilidad (Fair Value)
-                        if b['max'] >= 99999:
-                             fair = 1.0 - p_min
-                        else:
-                             p_max = norm.cdf(b['max']+1, final_mean, eff_std)
-                             fair = p_max - p_min
+                        if b['max'] >= 99999: fair = 1.0 - p_min
+                        else: fair = norm.cdf(b['max']+1, final_mean, eff_std) - p_min
 
                         action = "-"
                         reason = ""
@@ -619,24 +610,33 @@ def run():
                                 entry = pos_data['entry_price']
                                 profit_pct = (bid - entry) / entry if entry > 0 else 0
                                 
+                                # 1. Venta de Emergencia (Z-Score Roto)
                                 if z_score > 2.0:
                                     action = "ROTATE"; reason = f"Z-Score {z_score:.1f}"
                                     res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
                                     if res: save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score})
                                 
+                                # 2. Take Profit (Ganancia sólida)
                                 elif profit_pct > 0.30 and z_score > 1.8:
                                     action = "TAKE_PROFIT"; reason = f"Profit +{profit_pct*100:.0f}%"
                                     res = trader.execute(m_poly['title'], b['bucket'], "TAKE_PROFIT", bid, reason)
                                     if res: save_trade_snapshot("PROFIT", m_poly['title'], b['bucket'], bid, reason, {"profit": profit_pct})
 
+                                # 3. ### NUEVO: SMART ROTATION (V12.10) ###
+                                # Si estamos perdiendo tracción (-15% de profit) Y el Z-Score se aleja de la zona ideal (> 1.3)
+                                # Vendemos ANTES de llegar al límite de 2.0 para salvar capital y saltar al siguiente.
+                                elif profit_pct < -0.15 and z_score > 1.3:
+                                    action = "SMART_ROTATE"; reason = f"Trend Change Z{z_score:.1f}"
+                                    res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                    if res: save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+
                         elif not owned and not IS_WARMUP:
-                            # --- FIX 2: REALITY CHECK (FILTRO FÍSICO) ---
+                            # --- FIX 2: REALITY CHECK ---
                             is_impossible = False
                             if m_poly['hours'] < 1.0:
                                 tweets_needed = b['min'] - m_poly['count']
                                 if tweets_needed > (m_poly['hours'] * 15): 
                                     is_impossible = True
-                                    reason = "Impossible Pace" 
 
                             if not is_impossible:
                                 if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
@@ -644,15 +644,14 @@ def run():
                                     if ENABLE_CLUSTERING and my_buckets:
                                         is_neighbor = any(abs(mid - ov) <= CLUSTER_RANGE for ov in my_buckets)
                                     
-                                    # --- CAMBIO V12.8: UMBRAL MÁS BAJO ---
-                                    # Bajamos exigencia de 0.15 a 0.05
+                                    # Umbral V12.8 (0.05)
                                     edge = fair - ask
                                     if is_neighbor and edge > 0.05:
                                         action = "BUY"; reason = f"Val+{edge:.2f}"
                                         res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
                                         if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
 
-                        # PRINT INCONDICIONAL
+                        # PRINT
                         color_act = f"🟢 {action}" if "BUY" in action else (f"🔴 {action}" if "ROTATE" in action or "PROFIT" in action else "-")
                         bucket_display = f"*{b['bucket']}" if owned else f"{b['bucket']}"
                         print(f"{bucket_display:<10} | {bid:.3f}  | {ask:.3f}  | {fair:.3f}  | {z_score:.1f}   | {color_act} {reason}")
