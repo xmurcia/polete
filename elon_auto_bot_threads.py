@@ -540,8 +540,13 @@ def run():
                     print(f"⚠️ PÁNICO V10: {a['type']} en {a['bucket']} (Price: {a['price']})")
                 
                 bio_mult = get_bio_multiplier()
+
+                market_counts_map = {}
                 
                 for m_poly in markets:
+                    clean_title = ''.join(filter(str.isalnum, m_poly['title'].lower()))
+                    market_counts_map[clean_title] = m_poly['count']
+
                     m_clob = next((c for c in clob_data if titles_match_paranoid(m_poly['title'], c['title'])), None)
                     if not m_clob: continue
 
@@ -682,57 +687,39 @@ def run():
                         print(f"{bucket_display:<10} | {bid:.3f}  | {ask:.3f}  | {fair:.3f}  | {z_score:.1f}   | {color_act} {reason}")
 
             # ==============================================================================
-            # 🕵️‍♂️ FIX REALIDAD V4: MODO DIAGNÓSTICO (Con Chivatos)
+            # 💀 FIX REALIDAD GENÉRICO: EL MAPA DE LA VERDAD
             # ==============================================================================
-            print("\n--- INICIO DIAGNÓSTICO BUCKETS MUERTOS ---")
+            # Usamos los datos capturados durante el bucle principal (market_counts_map)
+            # para no depender de si la lista 'markets' se ha gastado o no.
+            
             for symbol, pos in trader.portfolio['positions'].items():
+                # 1. Normalizamos el nombre de nuestra posición
+                pos_clean = ''.join(filter(str.isalnum, pos['market'].lower()))
                 
-                # Normalizadora
-                def normalize(s): return ''.join(filter(str.isalnum, str(s).lower()))
-                pos_clean = normalize(pos['market'])
-                
-                print(f"🔍 Revisando Posición: {pos['bucket']} en '{pos['market'][:20]}...'")
-
-                m_curr = None
-                for m in markets:
-                    m_clean = normalize(m['title'])
-                    if pos_clean in m_clean or m_clean in pos_clean:
-                        m_curr = m
+                # 2. Buscamos coincidencias en el Mapa
+                found_count = None
+                for m_title_clean, m_count in market_counts_map.items():
+                    if pos_clean in m_title_clean or m_title_clean in pos_clean:
+                        found_count = m_count
                         break
                 
-                if m_curr:
+                # 3. Si encontramos datos, aplicamos la justicia
+                if found_count is not None:
                     try:
-                        # Parseamos bucket
                         bucket_str = pos['bucket']
-                        if "+" in bucket_str: 
-                            print(f"   ⚠️ Bucket infinito ignorado.")
-                            continue 
+                        if "+" in bucket_str: continue
                         
                         max_val = int(bucket_str.split('-')[1])
                         
-                        # Aseguramos que el count sea un entero (AQUÍ PODRÍA ESTAR EL FALLO)
-                        current_tweets = int(m_curr['count'])
-                        
-                        print(f"   📊 Tweets: {current_tweets} | Límite Bucket: {max_val}")
-
-                        if current_tweets > max_val:
-                            print(f"   💀 MUERTE DETECTADA. Forzando a 0.00.")
+                        # VEREDICTO: Si Tweets > Bucket Max -> VALE CERO
+                        if found_count > max_val:
                             pos['current_price'] = 0.0
                             pos['market_value'] = 0.0
-                            # FIX ADICIONAL: Inyectamos el precio en clob_data por si acaso
-                            clob_data[pos['bucket']] = 0.0 
-                        else:
-                            print(f"   ✅ Bucket VIVO.")
-                            
-                    except Exception as e:
-                        print(f"   ❌ ERROR en cálculo: {e}")
+                    except:
                         continue
-                else:
-                    print(f"   ❌ NO SE ENCONTRÓ MERCADO EN API PARA: {pos['market']}")
-
-            print("--- FIN DIAGNÓSTICO ---\n")
             # ==============================================================================
 
+            trader.print_summary(clob_data)
             trader.print_summary(clob_data) # <--- TU LINEA ORIGINAL
 
             trader.print_summary(clob_data)
