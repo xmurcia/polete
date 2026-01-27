@@ -682,38 +682,58 @@ def run():
                         print(f"{bucket_display:<10} | {bid:.3f}  | {ask:.3f}  | {fair:.3f}  | {z_score:.1f}   | {color_act} {reason}")
 
             # ==============================================================================
-            # 💀 FIX REALIDAD V3: COMPARACIÓN NUCLEAR (Solo letras y números)
+            # 🕵️‍♂️ FIX REALIDAD V4: MODO DIAGNÓSTICO (Con Chivatos)
             # ==============================================================================
+            print("\n--- INICIO DIAGNÓSTICO BUCKETS MUERTOS ---")
             for symbol, pos in trader.portfolio['positions'].items():
-                # Función auxiliar para "desnudar" el string de todo lo que no sea texto
-                def normalize(s): 
-                    return ''.join(filter(str.isalnum, str(s).lower()))
                 
+                # Normalizadora
+                def normalize(s): return ''.join(filter(str.isalnum, str(s).lower()))
                 pos_clean = normalize(pos['market'])
                 
+                print(f"🔍 Revisando Posición: {pos['bucket']} en '{pos['market'][:20]}...'")
+
                 m_curr = None
                 for m in markets:
                     m_clean = normalize(m['title'])
-                    
-                    # Comparamos las cadenas "desnudas"
                     if pos_clean in m_clean or m_clean in pos_clean:
                         m_curr = m
                         break
                 
                 if m_curr:
                     try:
+                        # Parseamos bucket
                         bucket_str = pos['bucket']
-                        if "+" in bucket_str: continue 
+                        if "+" in bucket_str: 
+                            print(f"   ⚠️ Bucket infinito ignorado.")
+                            continue 
                         
                         max_val = int(bucket_str.split('-')[1])
                         
-                        # VEREDICTO FINAL
-                        if m_curr['count'] > max_val:
+                        # Aseguramos que el count sea un entero (AQUÍ PODRÍA ESTAR EL FALLO)
+                        current_tweets = int(m_curr['count'])
+                        
+                        print(f"   📊 Tweets: {current_tweets} | Límite Bucket: {max_val}")
+
+                        if current_tweets > max_val:
+                            print(f"   💀 MUERTE DETECTADA. Forzando a 0.00.")
                             pos['current_price'] = 0.0
-                            pos['market_value'] = 0.0 # Forzamos valor 0
-                    except:
+                            pos['market_value'] = 0.0
+                            # FIX ADICIONAL: Inyectamos el precio en clob_data por si acaso
+                            clob_data[pos['bucket']] = 0.0 
+                        else:
+                            print(f"   ✅ Bucket VIVO.")
+                            
+                    except Exception as e:
+                        print(f"   ❌ ERROR en cálculo: {e}")
                         continue
+                else:
+                    print(f"   ❌ NO SE ENCONTRÓ MERCADO EN API PARA: {pos['market']}")
+
+            print("--- FIN DIAGNÓSTICO ---\n")
             # ==============================================================================
+
+            trader.print_summary(clob_data) # <--- TU LINEA ORIGINAL
 
             trader.print_summary(clob_data)
             time.sleep(8) 
