@@ -456,10 +456,10 @@ class MarketPanicSensor:
         return alerts
 
 # ==========================================
-# 6. DIRECTOR (V12.13 - PARANOID TREASURE MODE)
+# 6. DIRECTOR (V12.15 - ACTIVE BUCKET SAFETY)
 # ==========================================
 def run():
-    print("\n🤖 ELON-BOT V12.13 (PARANOID TREASURE MODE)")
+    print("\n🤖 ELON-BOT V12.15 (ACTIVE BUCKET SAFETY MODE)")
     
     # Utiles V10
     def log_monitor(msg):
@@ -604,27 +604,40 @@ def run():
                                 entry = pos_data['entry_price']
                                 profit_pct = (bid - entry) / entry if entry > 0 else 0
                                 
-                                # --- LÓGICA V12.13 (PARANOID TREASURE) ---
+                                # --- ESTRATEGIA DEFENSIVA V12.15 (SAFE ZONE) ---
                                 
                                 should_sell = False
                                 sell_reason = ""
+                                
+                                # Calcular cuántos tweets quedan de margen
+                                bucket_headroom = b['max'] - m_poly['count']
+                                
+                                # Detectar si estamos en el BUCKET ACTIVO (Zona de Muerte)
+                                is_active_bucket = (m_poly['count'] >= b['min'])
+                                
+                                # Definir margen de seguridad dinámico
+                                # Si es el bucket activo, queremos 12 tweets de margen.
+                                # Si es futuro, 5 tweets.
+                                safety_threshold = 12 if is_active_bucket else 5
 
-                                # 1. TESORO PARANOICO (>100% Ganancia)
-                                # Bajamos el Z-Score permitido a 0.6 (antes 0.9).
-                                # Esto significa: "Si no eres el bucket FAVORITO ABSOLUTO, véndelo ya".
-                                if profit_pct > 1.0 and z_score > 0.6:
-                                    should_sell = True; sell_reason = "Paranoid Treasure Protection"
+                                # 1. REGLA DE PROXIMIDAD DINÁMICA
+                                # Si nos acercamos al techo y vamos ganando -> VENDER
+                                if bucket_headroom < safety_threshold and bucket_headroom >= 0 and profit_pct > 0:
+                                    should_sell = True; sell_reason = f"Proximity Danger ({bucket_headroom} left)"
 
-                                # 2. PROTECCIÓN DE BENEFICIO (>0% Ganancia)
-                                # Si vamos ganando algo, no dejamos que el Z-Score pase de 1.3
+                                # 2. TESORO PARANOICO (>100% Ganancia)
+                                elif profit_pct > 1.0 and z_score > 0.6:
+                                    should_sell = True; sell_reason = "Paranoid Treasure"
+
+                                # 3. PROTECCIÓN DE BENEFICIO NORMAL (>0% Ganancia)
                                 elif profit_pct > 0.0 and z_score > 1.3:
                                     should_sell = True; sell_reason = "Protect Profit"
 
-                                # 3. STOP LOSS (< -15%)
+                                # 4. STOP LOSS (< -15%)
                                 elif profit_pct < -0.15 and z_score > 1.3:
                                     should_sell = True; sell_reason = "Stop Loss"
                                 
-                                # 4. PÁNICO GLOBAL
+                                # 5. PÁNICO GLOBAL
                                 elif z_score > 2.0:
                                     should_sell = True; sell_reason = "Panic Exit"
 
