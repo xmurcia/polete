@@ -681,6 +681,29 @@ def run():
                         bucket_display = f"*{b['bucket']}" if owned else f"{b['bucket']}"
                         print(f"{bucket_display:<10} | {bid:.3f}  | {ask:.3f}  | {fair:.3f}  | {z_score:.1f}   | {color_act} {reason}")
 
+            # ==============================================================================
+            # 💀 FIX REALIDAD: SANITIZADOR DE BUCKETS MUERTOS
+            # ==============================================================================
+            # Pegar esto JUSTO ANTES de trader.print_summary
+            for symbol, pos in trader.portfolio['positions'].items():
+                # 1. Buscar el mercado correspondiente en los datos actuales
+                m_curr = next((m for m in markets if m['title'] in pos['market'] or pos['market'] in m['title']), None)
+                
+                if m_curr:
+                    try:
+                        # 2. Obtener límite superior del bucket (Ej: "360-379" -> 379)
+                        bucket_str = pos['bucket']
+                        if "+" in bucket_str: continue # Los buckets infinitos (+) no mueren por arriba
+                        
+                        max_val = int(bucket_str.split('-')[1])
+                        
+                        # 3. Si Elon se ha pasado de tweets, esto vale CERO.
+                        if m_curr['count'] > max_val:
+                            pos['current_price'] = 0.0
+                    except:
+                        continue
+            # ==============================================================================
+
             trader.print_summary(clob_data)
             time.sleep(8) 
 
