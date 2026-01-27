@@ -682,17 +682,21 @@ def run():
                         print(f"{bucket_display:<10} | {bid:.3f}  | {ask:.3f}  | {fair:.3f}  | {z_score:.1f}   | {color_act} {reason}")
 
             # ==============================================================================
-            # 💀 FIX REALIDAD V2: SANITIZADOR ROBUSTO (Ignora comas y mayúsculas)
+            # 💀 FIX REALIDAD V3: COMPARACIÓN NUCLEAR (Solo letras y números)
             # ==============================================================================
             for symbol, pos in trader.portfolio['positions'].items():
-                # 1. Normalizamos los nombres (quitamos comas y a minúsculas)
-                pos_market_clean = pos['market'].replace(',', '').lower().strip()
+                # Función auxiliar para "desnudar" el string de todo lo que no sea texto
+                def normalize(s): 
+                    return ''.join(filter(str.isalnum, str(s).lower()))
+                
+                pos_clean = normalize(pos['market'])
                 
                 m_curr = None
                 for m in markets:
-                    m_title_clean = m['title'].replace(',', '').lower().strip()
-                    # Comparamos si uno está contenido en el otro
-                    if pos_market_clean in m_title_clean or m_title_clean in pos_market_clean:
+                    m_clean = normalize(m['title'])
+                    
+                    # Comparamos las cadenas "desnudas"
+                    if pos_clean in m_clean or m_clean in pos_clean:
                         m_curr = m
                         break
                 
@@ -703,11 +707,10 @@ def run():
                         
                         max_val = int(bucket_str.split('-')[1])
                         
-                        # 3. Si Elon se ha pasado (394 > 379), VALE CERO.
+                        # VEREDICTO FINAL
                         if m_curr['count'] > max_val:
                             pos['current_price'] = 0.0
-                            # Forzamos también el valor actual para que el cálculo de P&L sea inmediato
-                            pos['market_value'] = 0.0
+                            pos['market_value'] = 0.0 # Forzamos valor 0
                     except:
                         continue
             # ==============================================================================
