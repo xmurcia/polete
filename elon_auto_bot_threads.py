@@ -687,40 +687,58 @@ def run():
                         print(f"{bucket_display:<10} | {bid:.3f}  | {ask:.3f}  | {fair:.3f}  | {z_score:.1f}   | {color_act} {reason}")
 
             # ==============================================================================
-            # 💀 FIX REALIDAD GENÉRICO: EL MAPA DE LA VERDAD
+            # 🧼 FIX FINAL: HIGIENE TOTAL DEL PORTFOLIO
             # ==============================================================================
-            # Usamos los datos capturados durante el bucle principal (market_counts_map)
-            # para no depender de si la lista 'markets' se ha gastado o no.
             
-            for symbol, pos in trader.portfolio['positions'].items():
-                # 1. Normalizamos el nombre de nuestra posición
-                pos_clean = ''.join(filter(str.isalnum, pos['market'].lower()))
+            # 1. Crear mapa de mercados vivos para acceso rápido
+            #    Clave: Título normalizado -> Valor: Objeto mercado completo (con count)
+            live_markets_map = {}
+            for m in markets:
+                clean_title = ''.join(filter(str.isalnum, m['title'].lower()))
+                live_markets_map[clean_title] = m
+
+            # 2. Revisar cada posición una a una
+            #    Usamos list(...) para poder borrar elementos del diccionario mientras iteramos
+            for symbol in list(trader.portfolio['positions'].keys()):
+                pos = trader.portfolio['positions'][symbol]
                 
-                # 2. Buscamos coincidencias en el Mapa
-                found_count = None
-                for m_title_clean, m_count in market_counts_map.items():
-                    if pos_clean in m_title_clean or m_title_clean in pos_clean:
-                        found_count = m_count
+                # Normalizamos el nombre de la posición
+                pos_fingerprint = ''.join(filter(str.isalnum, pos['market'].lower()))
+                
+                # --- CASO A: ¿EL MERCADO HA DESAPARECIDO? (EXPIRADO) ---
+                # Buscamos coincidencias en el mapa
+                found_market = None
+                for live_fp, m_obj in live_markets_map.items():
+                    if pos_fingerprint in live_fp or live_fp in pos_fingerprint:
+                        found_market = m_obj
                         break
                 
-                # 3. Si encontramos datos, aplicamos la justicia
-                if found_count is not None:
-                    try:
-                        bucket_str = pos['bucket']
-                        if "+" in bucket_str: continue
-                        
+                if not found_market:
+                    # El mercado ya no está en la API. Se acabó el evento.
+                    # Borramos la posición (asumimos valor 0 o lo que se recuperó al cierre)
+                    print(f"🧹 LIMPIEZA: Mercado expirado. Eliminando posición {pos['bucket']}.")
+                    del trader.portfolio['positions'][symbol]
+                    continue # Pasamos a la siguiente
+
+                # --- CASO B: EL MERCADO VIVE, ¿PERO MI BUCKET ESTÁ MUERTO? ---
+                try:
+                    bucket_str = pos['bucket']
+                    # Solo aplicamos lógica a buckets cerrados (no a los "+" infinitos)
+                    if "+" not in bucket_str:
                         max_val = int(bucket_str.split('-')[1])
+                        current_count = found_market['count']
                         
-                        # VEREDICTO: Si Tweets > Bucket Max -> VALE CERO
-                        if found_count > max_val:
+                        # SI YA NOS HAN PASADO (Tweets > Max Bucket)
+                        if current_count > max_val:
+                            # La posición existe, pero vale CERO.
                             pos['current_price'] = 0.0
                             pos['market_value'] = 0.0
-                    except:
-                        continue
-            # ==============================================================================
+                            # (Opcional) Le inyectamos el precio 0 al clob_data para la visualización
+                            clob_data[pos['bucket']] = 0.0 
+                except:
+                    pass # Si hay error de formato, no tocamos nada
 
-            trader.print_summary(clob_data)
-            trader.print_summary(clob_data) # <--- TU LINEA ORIGINAL
+            # ==============================================================================
 
             trader.print_summary(clob_data)
             time.sleep(8) 
