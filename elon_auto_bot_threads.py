@@ -676,7 +676,7 @@ def run():
                         print(f"{bucket_display:<10} | {bid:.3f}  | {ask:.3f}  | {fair:.3f}  | {z_score:.1f}   | {color_act} {reason}")
 
             trader.print_summary(clob_data)
-            time.sleep(15) 
+            time.sleep(8) 
 
         except KeyboardInterrupt: break
         except Exception as e: 
