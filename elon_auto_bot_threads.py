@@ -661,11 +661,11 @@ def run():
                             if not is_impossible:
                                 # === FIX CRÍTICO V12.16 (ANTI-CHURN) ===
                                 # Antes: if z_score <= MAX_Z_SCORE_ENTRY
-                                # Ahora: if z_score <= 1.2
+                                # Ahora: if z_score <= 0.8
                                 # Explicación: Si nuestro Stop Loss salta en 1.3, NO PODEMOS comprar en 1.5.
-                                # Ponemos el techo de compra en 1.2 para dejar un margen de seguridad.
+                                # Ponemos el techo de compra en 0.8 para dejar un margen de seguridad.
                                 
-                                if z_score <= 1.2 and ask >= MIN_PRICE_ENTRY:
+                                if z_score <= 0.8 and ask >= MIN_PRICE_ENTRY:
                                     is_neighbor = True
                                     if ENABLE_CLUSTERING and my_buckets:
                                         is_neighbor = any(abs(mid - ov) <= CLUSTER_RANGE for ov in my_buckets)
