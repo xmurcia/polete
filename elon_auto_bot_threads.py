@@ -6,7 +6,7 @@ import requests
 import numpy as np
 import pandas as pd
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from scipy.optimize import minimize
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import dateutil.parser
@@ -459,7 +459,7 @@ class MarketPanicSensor:
 # 6. DIRECTOR (V12.15 - ACTIVE BUCKET SAFETY)
 # ==========================================
 def run():
-    print("\n🤖 ELON-BOT V12.15 (ACTIVE BUCKET SAFETY MODE)")
+    print("\n🤖 ELON-BOT V12.16 (ACTIVE SAFETY + COOLDOWN MODE)")
     
     # Utiles V10
     def log_monitor(msg):
@@ -503,6 +503,12 @@ def run():
                 d = json.load(f)
                 global_events = [e for e in d if (time.time()*1000 - e['timestamp']) < 86400000]
         except: pass
+    
+    # ==============================================================================
+    # ❄️ INIT COOLDOWNS: Memoria de castigos
+    # ==============================================================================
+    # Clave: Nombre del Bucket | Valor: Hora a la que se levanta el castigo (datetime)
+    stop_loss_cooldowns = {}
 
     while True:
         try:
@@ -584,6 +590,20 @@ def run():
 
                     for b in m_clob['buckets']:
                         if b['max'] < m_poly['count']: continue 
+
+                        # ==============================================================
+                        # ❄️ COOLDOWN CHECK: El filtro de seguridad
+                        # ==============================================================
+                        if b['bucket'] in stop_loss_cooldowns:
+                            if datetime.now() < stop_loss_cooldowns[b['bucket']]:
+                                # Si quieres ver el log, descomenta:
+                                # unlock_time = stop_loss_cooldowns[b['bucket']].strftime('%H:%M')
+                                # print(f"{b['bucket']:<10} | -      | -      | -      | -      | ❄️ COOLDOWN ({unlock_time})")
+                                continue
+                            else:
+                                # Ya pasó el tiempo, borramos el castigo
+                                del stop_loss_cooldowns[b['bucket']]
+                        # ==============================================================
                         
                         bid, ask = b.get('bid',0), b.get('ask',0)
                         
@@ -654,7 +674,17 @@ def run():
                                 if should_sell:
                                     action = "SMART_ROTATE"; reason = f"{sell_reason} Z{z_score:.1f}"
                                     res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
-                                    if res: save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                    if res: 
+                                        save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                        
+                                        # ==============================================================
+                                        # ❄️ TRIGGER COOLDOWN: Si fue Stop Loss, bloqueo 45 min
+                                        # ==============================================================
+                                        if "Stop Loss" in sell_reason:
+                                            cooldown_end = datetime.now() + timedelta(minutes=45)
+                                            stop_loss_cooldowns[b['bucket']] = cooldown_end
+                                            print(f"❄️ CASTIGO ACTIVADO: {b['bucket']} bloqueado hasta {cooldown_end.strftime('%H:%M')}")
+                                        # ==============================================================
 
                         elif not owned and not IS_WARMUP:
                             # --- FIX 2: REALITY CHECK ---
