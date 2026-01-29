@@ -652,11 +652,11 @@ def run():
                                     safety_threshold = 5   # Última hora: Arriesgamos más
                                 else:
                                     safety_threshold = 2   # Minutos finales: Aguantamos al límite
-
-                                # 3. REGLA DE PROXIMIDAD DINÁMICA
-                                # Solo vendemos si estamos en ganancia y el margen es menor al seguro
-                                if bucket_headroom < safety_threshold and bucket_headroom >= 0 and profit_pct > 0:
-                                    should_sell = True; sell_reason = f"Proximity Danger ({bucket_headroom} left in {hours_left:.1f}h)"
+                                
+                                # 3. REGLA DE PROXIMIDAD DINÁMICA (MODO SUPERVIVENCIA)
+                                # Quitamos 'profit_pct > 0'. Si el barco se hunde (quedan pocos tweets), saltamos AUNQUE PERDAMOS.
+                                if bucket_headroom < safety_threshold and bucket_headroom >= 0:
+                                    should_sell = True; sell_reason = f"Proximity Danger ({bucket_headroom} left in {hours_left:.1f}h)" 
 
                                 # 2. TESORO PARANOICO
                                 # Ajusta el umbral de ganancia (profit_pct) y la tolerancia (z_score)
