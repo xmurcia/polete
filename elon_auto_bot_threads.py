@@ -632,23 +632,31 @@ def run():
                                 # --- ESTRATEGIA DEFENSIVA V12.15 (SAFE ZONE) ---
                                 
                                 should_sell = False
-                                sell_reason = ""
+                                sell_reason = "" 
                                 
-                                # Calcular cuántos tweets quedan de margen
+                                # --- ESTRATEGIA DEFENSIVA V12.17 (TIME-AWARE SAFETY) ---
+                                # 1. Distancia al TECHO del bucket (¿Cuántos tweets faltan para morir?)
                                 bucket_headroom = b['max'] - m_poly['count']
                                 
-                                # Detectar si estamos en el BUCKET ACTIVO (Zona de Muerte)
-                                is_active_bucket = (m_poly['count'] >= b['min'])
+                                # 2. Margen Dinámico basado en Tiempo Restante
+                                # Lógica: Si falta mucho tiempo, exigimos más seguridad. Si falta poco, arriesgamos.
+                                hours_left = m_poly['hours']
                                 
-                                # Definir margen de seguridad dinámico
-                                # Si es el bucket activo, queremos 12 tweets de margen.
-                                # Si es futuro, 5 tweets.
-                                safety_threshold = 12 if is_active_bucket else 5
+                                if hours_left > 24.0:
+                                    safety_threshold = 20  # Faltan días: Mucha seguridad
+                                elif hours_left > 12.0:
+                                    safety_threshold = 15  # Falta medio día: Seguridad estándar
+                                elif hours_left > 6.0:
+                                    safety_threshold = 10  # Se acerca el final
+                                elif hours_left > 1.0:
+                                    safety_threshold = 5   # Última hora: Arriesgamos más
+                                else:
+                                    safety_threshold = 2   # Minutos finales: Aguantamos al límite
 
-                                # 1. REGLA DE PROXIMIDAD DINÁMICA
-                                # Si nos acercamos al techo y vamos ganando -> VENDER
+                                # 3. REGLA DE PROXIMIDAD DINÁMICA
+                                # Solo vendemos si estamos en ganancia y el margen es menor al seguro
                                 if bucket_headroom < safety_threshold and bucket_headroom >= 0 and profit_pct > 0:
-                                    should_sell = True; sell_reason = f"Proximity Danger ({bucket_headroom} left)"
+                                    should_sell = True; sell_reason = f"Proximity Danger ({bucket_headroom} left in {hours_left:.1f}h)"
 
                                 # 2. TESORO PARANOICO
                                 # Ajusta el umbral de ganancia (profit_pct) y la tolerancia (z_score)
