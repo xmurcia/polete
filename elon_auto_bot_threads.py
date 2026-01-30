@@ -695,6 +695,28 @@ def run():
                                         # ==============================================================
 
                         elif not owned and not IS_WARMUP:
+                            
+                            # ==============================================================================
+                            # 🛡️ FILTRO ANTI-KAMIKAZE (IMPEDIR ENTRADA EN ZONA DE PELIGRO)
+                            # ==============================================================================
+                            # Si la lógica de venta dice "Vende por peligro", la de compra debe decir "No entres".
+                            
+                            bucket_headroom = b['max'] - m_poly['count']
+                            hours_left = m_poly['hours']
+                            
+                            # Mismos umbrales que usamos para vender (Sincronización total)
+                            if hours_left > 24.0: buy_safety = 20
+                            elif hours_left > 12.0: buy_safety = 15
+                            elif hours_left > 6.0: buy_safety = 10
+                            elif hours_left > 1.0: buy_safety = 5
+                            else: buy_safety = 2
+                            
+                            # Si el margen es menor que la seguridad, BLOQUEAMOS LA COMPRA
+                            if bucket_headroom < buy_safety:
+                                # print(f"🚫 SKIP BUY {b['bucket']}: Zona Peligrosa ({bucket_headroom} tweets margen)")
+                                continue
+                            # ==============================================================================
+                            
                             # --- FIX 2: REALITY CHECK ---
                             is_impossible = False
                             if m_poly['hours'] < 1.0:
