@@ -604,6 +604,36 @@ def run():
                                 # Ya pasó el tiempo, borramos el castigo
                                 del stop_loss_cooldowns[b['bucket']]
                         # ==============================================================
+
+                        # ==============================================================
+                        # 🧠 REALITY CHECK V12.25 (FILTRO ANTI-DELIRIO)
+                        # ==============================================================
+                        # Calculamos proyección realista. Si el bucket pide milagros, lo ignoramos.
+                        try:
+                            rc_hours = m_poly.get('hours', 24.0)
+                            rc_count = m_poly.get('count', 0)
+                            
+                            # Factor: 1.15 (Recta final) a 1.60 (Inicio semana)
+                            if rc_hours > 96: rc_factor = 1.60
+                            elif rc_hours > 48: rc_factor = 1.40
+                            elif rc_hours > 24: rc_factor = 1.25
+                            else: rc_factor = 1.15
+
+                            # Ritmo actual proyectado
+                            # (Asumimos evento semanal 168h o corto 72h para calcular el ritmo)
+                            rc_elapsed = max(1.0, (168.0 if rc_hours > 72 else 72.0) - rc_hours)
+                            rc_proj = rc_count + (rc_count / rc_elapsed * rc_hours)
+                            
+                            # Si el bucket empieza muy por encima de la realidad...
+                            if b['min'] > (rc_proj * rc_factor):
+                                # TRUCO DE SEGURIDAD:
+                                # No usamos 'continue' para no romper la lógica de VENTA si ya lo tienes.
+                                # En su lugar, ponemos el precio de COMPRA (ask) a 9999.
+                                # Así el bot verá que comprarlo es imposible, pero podrá venderlo si es tuyo.
+                                b['ask'] = 9999.0
+                                
+                        except: pass # Si faltan datos, no rompemos nada, seguimos normal
+                        # ==============================================================
                         
                         bid, ask = b.get('bid',0), b.get('ask',0)
                         
