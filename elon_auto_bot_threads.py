@@ -675,12 +675,15 @@ def run():
                                     should_sell = True
                                     sell_reason = f"Victory Lap (Price {bid:.2f} > 0.92)"
 
-                                # 5. STOP LOSS ADAPTATIVO
-                                # Temprano (>48h): -15% | Final (<48h): -40% (Permitimos volatilidad)
-                                elif profit_pct < (-0.15 if hours_left > 48.0 else -0.40) and z_score > 1.3:
+                                # 5. STOP LOSS "ANTI-SPREAD" (ADAPTATIVO)
+                                # ----------------------------------------------------------------------
+                                # A) FASE TEMPRANA (> 48h): -30% para evitar el spread.
+                                # B) FASE FINAL (< 48h): -200% (Desactivado) para aguantar volatilidad.
+                                # Usamos una estructura en línea para no romper la cadena de 'elif'.
+                                elif profit_pct < (-0.30 if hours_left > 48.0 else -2.0) and z_score > 1.3:
                                     should_sell = True
                                     sell_reason = f"Stop Loss (Hit {profit_pct*100:.1f}%)"
-                                
+                                 
                                 # 6. PÁNICO GLOBAL
                                 elif z_score > 2.0:
                                     should_sell = True
