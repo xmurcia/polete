@@ -628,71 +628,77 @@ def run():
                             if pos_data:
                                 entry = pos_data['entry_price']
                                 profit_pct = (bid - entry) / entry if entry > 0 else 0
-                                
-                                # --- ESTRATEGIA DEFENSIVA V12.15 (SAFE ZONE) ---
-                                
                                 should_sell = False
                                 sell_reason = "" 
                                 
-                                # --- ESTRATEGIA DEFENSIVA V12.17 (TIME-AWARE SAFETY) ---
-                                # 1. Distancia al TECHO del bucket (¿Cuántos tweets faltan para morir?)
+                                # --- DATOS PARA DECISIÓN ---
                                 bucket_headroom = b['max'] - m_poly['count']
-                                
-                                # 2. Margen Dinámico basado en Tiempo Restante
-                                # Lógica: Si falta mucho tiempo, exigimos más seguridad. Si falta poco, arriesgamos.
                                 hours_left = m_poly['hours']
                                 
+                                # Calcular Umbral de Seguridad (Safety Threshold)
                                 if hours_left > 24.0:
-                                    safety_threshold = 20  # Faltan días: Mucha seguridad
+                                    safety_threshold = 20
                                 elif hours_left > 12.0:
-                                    safety_threshold = 15  # Falta medio día: Seguridad estándar
+                                    safety_threshold = 15
                                 elif hours_left > 6.0:
-                                    safety_threshold = 10  # Se acerca el final
+                                    safety_threshold = 10
                                 elif hours_left > 1.0:
-                                    safety_threshold = 5   # Última hora: Arriesgamos más
+                                    safety_threshold = 5
                                 else:
-                                    safety_threshold = 2   # Minutos finales: Aguantamos al límite
+                                    safety_threshold = 2
                                 
-                                # 3. REGLA DE PROXIMIDAD DINÁMICA (MODO SUPERVIVENCIA)
-                                # Quitamos 'profit_pct > 0'. Si el barco se hunde (quedan pocos tweets), saltamos AUNQUE PERDAMOS.
+                                # ==============================================================================
+                                # CADENA DE DECISIONES DE VENTA (PRIORIDAD DE ARRIBA A ABAJO)
+                                # ==============================================================================
+
+                                # 1. PROXIMITY DANGER (SEGURIDAD MÁXIMA)
+                                # Si faltan pocos tweets para romper, vendemos SIEMPRE.
                                 if bucket_headroom < safety_threshold and bucket_headroom >= 0:
-                                    should_sell = True; sell_reason = f"Proximity Danger ({bucket_headroom} left in {hours_left:.1f}h)" 
+                                    should_sell = True
+                                    sell_reason = f"Proximity Danger ({bucket_headroom} left)" 
 
-                                # 2. TESORO PARANOICO
-                                # Ajusta el umbral de ganancia (profit_pct) y la tolerancia (z_score)
-                                # OPCIÓN CONSERVADORA (La actual): > 1.0 (100%)
-                                # OPCIÓN EQUILIBRADA (Recomendada): > 1.5 (150%)
-                                # OPCIÓN AGRESIVA: > 2.0 (200%)
-                                # Y recuerda el Z-Score: 0.9 es el equilibrio.
-                                elif profit_pct > 1.5 and z_score > 0.9:  # <--- Aquí he puesto 1.5 (150%)
-                                    should_sell = True; sell_reason = "Paranoid Treasure (>150%)"
+                                # 2. PARANOID TREASURE (SOLO FASE TEMPRANA > 48H)
+                                # Si falta mucho tiempo y ganamos +150%, aseguramos.
+                                elif hours_left > 48.0 and profit_pct > 1.5 and z_score > 0.9:
+                                    should_sell = True
+                                    sell_reason = "Paranoid Treasure (Early Phase)"
+                                    
+                                # 3. PROTECT PROFIT (SOLO FASE TEMPRANA > 48H)
+                                # Si falta mucho tiempo y el Z-Score es alto, protegemos ganancias pequeñas.
+                                elif hours_left > 48.0 and profit_pct > 0.0 and z_score > 1.3:
+                                    should_sell = True
+                                    sell_reason = "Protect Profit (Early Phase)"
 
-                                # 3. PROTECCIÓN DE BENEFICIO NORMAL (>0% Ganancia)
-                                elif profit_pct > 0.0 and z_score > 1.3:
-                                    should_sell = True; sell_reason = "Protect Profit"
+                                # 4. VICTORY LAP (SOLO FASE FINAL < 48H) - TU CASO HOY
+                                # En la recta final, solo vendemos si el precio es > $0.92 (Ya ganado).
+                                elif hours_left <= 48.0 and bid > 0.92:
+                                    should_sell = True
+                                    sell_reason = f"Victory Lap (Price {bid:.2f} > 0.92)"
 
-                                # 4. STOP LOSS (< -15%)
-                                elif profit_pct < -0.15 and z_score > 1.3:
-                                    should_sell = True; sell_reason = "Stop Loss"
+                                # 5. STOP LOSS ADAPTATIVO
+                                # Temprano (>48h): -15% | Final (<48h): -40% (Permitimos volatilidad)
+                                elif profit_pct < (-0.15 if hours_left > 48.0 else -0.40) and z_score > 1.3:
+                                    should_sell = True
+                                    sell_reason = f"Stop Loss (Hit {profit_pct*100:.1f}%)"
                                 
-                                # 5. PÁNICO GLOBAL
+                                # 6. PÁNICO GLOBAL
                                 elif z_score > 2.0:
-                                    should_sell = True; sell_reason = "Panic Exit"
+                                    should_sell = True
+                                    sell_reason = "Panic Exit"
 
+                                # ==============================================================================
+                                # EJECUCIÓN DE LA VENTA
+                                # ==============================================================================
                                 if should_sell:
                                     action = "SMART_ROTATE"; reason = f"{sell_reason} Z{z_score:.1f}"
                                     res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
                                     if res: 
                                         save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
                                         
-                                        # ==============================================================
-                                        # ❄️ TRIGGER COOLDOWN: Si fue Stop Loss, bloqueo 45 min
-                                        # ==============================================================
                                         if "Stop Loss" in sell_reason:
                                             cooldown_end = datetime.now() + timedelta(minutes=45)
                                             stop_loss_cooldowns[b['bucket']] = cooldown_end
                                             print(f"❄️ CASTIGO ACTIVADO: {b['bucket']} bloqueado hasta {cooldown_end.strftime('%H:%M')}")
-                                        # ==============================================================
 
                         elif not owned and not IS_WARMUP:
                             
