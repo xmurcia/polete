@@ -603,48 +603,44 @@ def run():
                             else:
                                 # Ya pasó el tiempo, borramos el castigo
                                 del stop_loss_cooldowns[b['bucket']]
-                        # ==============================================================
-
-                        # ==============================================================
-                        # 🧠 REALITY CHECK V12.25 (FILTRO ANTI-DELIRIO)
-                        # ==============================================================
-                        # Calculamos proyección realista. Si el bucket pide milagros, lo ignoramos.
-                        try:
-                            rc_hours = m_poly.get('hours', 24.0)
-                            rc_count = m_poly.get('count', 0)
-                            
-                            # Factor: 1.15 (Recta final) a 1.60 (Inicio semana)
-                            if rc_hours > 96: rc_factor = 1.60
-                            elif rc_hours > 48: rc_factor = 1.40
-                            elif rc_hours > 24: rc_factor = 1.25
-                            else: rc_factor = 1.15
-
-                            # Ritmo actual proyectado
-                            # (Asumimos evento semanal 168h o corto 72h para calcular el ritmo)
-                            rc_elapsed = max(1.0, (168.0 if rc_hours > 72 else 72.0) - rc_hours)
-                            rc_proj = rc_count + (rc_count / rc_elapsed * rc_hours)
-                            
-                            # Si el bucket empieza muy por encima de la realidad...
-                            if b['min'] > (rc_proj * rc_factor):
-                                # TRUCO DE SEGURIDAD:
-                                # No usamos 'continue' para no romper la lógica de VENTA si ya lo tienes.
-                                # En su lugar, ponemos el precio de COMPRA (ask) a 9999.
-                                # Así el bot verá que comprarlo es imposible, pero podrá venderlo si es tuyo.
-                                b['ask'] = 9999.0
-                                
-                        except: pass # Si faltan datos, no rompemos nada, seguimos normal
-                        # ==============================================================
                         
                         bid, ask = b.get('bid',0), b.get('ask',0)
+                        
+                        # ==============================================================
+                        # 📉 V13 SIGMA DECAY: Colapso de Varianza Temporal
+                        # ==============================================================
+                        # A medida que se acaba el tiempo, la campana de Gauss debe estrecharse.
+                        # Si no hacemos esto, el bot sobrevalora buckets lejanos al final.
                         
                         if b['max'] >= 99999: mid = b['min'] + 20
                         else: mid = (b['min'] + b['max']) / 2
                         
-                        z_score = abs(mid - final_mean) / eff_std
-                        p_min = norm.cdf(b['min'], final_mean, eff_std)
+                        # 1. Recuperar horas restantes
+                        h_left = m_poly.get('hours', 24.0)
+                        
+                        # 2. Factor de Decaimiento (Raíz Cuadrada del Tiempo)
+                        # Base 72h (3 días). 
+                        # - Si faltan 72h -> Factor 1.0 (Volatilidad total)
+                        # - Si faltan 18h -> Factor 0.5 (Mitad de volatilidad)
+                        decay_factor = (h_left / 72.0) ** 0.5
+                        
+                        # 3. Clamp (Suelo de seguridad)
+                        # Nunca bajamos del 25% de la volatilidad original para evitar división por cero
+                        # o excesiva confianza ante cisnes negros.
+                        decay_factor = max(0.25, min(1.0, decay_factor))
+                        
+                        # 4. Sigma Ajustada (Esta es la clave del V13)
+                        decayed_std = eff_std * decay_factor
+                        
+                        # --------------------------------------------------------------
+                        # CÁLCULOS USANDO LA NUEVA SIGMA AJUSTADA
+                        # --------------------------------------------------------------
+                        z_score = abs(mid - final_mean) / decayed_std
+                        p_min = norm.cdf(b['min'], final_mean, decayed_std)
                         
                         if b['max'] >= 99999: fair = 1.0 - p_min
-                        else: fair = norm.cdf(b['max']+1, final_mean, eff_std) - p_min
+                        else: fair = norm.cdf(b['max']+1, final_mean, decayed_std) - p_min
+                        # ==============================================================
 
                         action = "-"
                         reason = ""
