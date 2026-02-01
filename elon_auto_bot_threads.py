@@ -686,9 +686,9 @@ def run():
 
                                 # B) VICTORY LAP (Asegurar Ganancia Final)
                                 # Si estamos en la recta final y el precio ya es casi $1.00, vendemos.
-                                elif hours_left <= 48.0 and bid > 0.92:
+                                elif hours_left <= 48.0 and bid > 0.95:
                                     should_sell = True
-                                    sell_reason = f"Victory Lap (Price {bid:.2f} > 0.92)"
+                                    sell_reason = f"Victory Lap (Price {bid:.2f} > 0.95)"
 
                                 # ------------------------------------------------------------------------------
                                 # 2. REGLAS ESTADÍSTICAS (SOLO FASE TEMPRANA > 24H)
@@ -705,9 +705,32 @@ def run():
                                     elif profit_pct > 0.0 and z_score > 1.3:
                                         should_sell = True; sell_reason = "Protect Profit (Early)"
 
-                                    # Stop Loss Estándar (Anti-Spread)
-                                    elif profit_pct < -0.30 and z_score > 1.3:
-                                        should_sell = True; sell_reason = f"Stop Loss (Early Game)"
+                                        # 5. STOP LOSS INTELIGENTE (PENNY STOCK PROTECTION V12.26)
+                                    # ----------------------------------------------------------------------
+                                    # Calculamos el precio de entrada para saber si es "Bucket Basura" o "Bucket Bueno"
+                                    # (Si no tenemos el dato directo, lo deducimos del profit)
+                                    avg_entry = bid / (1 + profit_pct) if (1 + profit_pct) != 0 else bid
+                                    
+                                    # REGLA DE HOLGURA:
+                                    # Si costó menos de 5 céntimos, aguantamos hasta morir (-75%).
+                                    # Si costó menos de 10 céntimos, aguantamos mucho (-60%).
+                                    # Si costó más, protegemos normal (-30%).
+                                    if avg_entry < 0.05:
+                                        sl_limit = -0.75
+                                    elif avg_entry < 0.10:
+                                        sl_limit = -0.60
+                                    else:
+                                        sl_limit = -0.30
+
+                                    # REGLA DE TIEMPO (IRON HANDS):
+                                    # Si falta menos de 48h, desactivamos el Stop Loss (-200%) para aguantar volatilidad final.
+                                    if hours_left < 48.0:
+                                        sl_limit = -2.0
+
+                                    # EJECUCIÓN
+                                    elif profit_pct < sl_limit and z_score > 1.3:
+                                        should_sell = True
+                                        sell_reason = f"Stop Loss Adaptativo (Hit {profit_pct*100:.1f}% vs Limit {sl_limit*100:.0f}%)"
                                     
                                     # Pánico Global
                                     elif z_score > 2.0:
