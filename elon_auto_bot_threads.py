@@ -687,19 +687,26 @@ def run():
                                     sell_reason = f"Victory Lap (Price {bid:.2f} > 0.95)"
 
                                 # ------------------------------------------------------------------------------
-                                # 2. REGLAS ESTADÍSTICAS (SOLO FASE TEMPRANA > 24H)
-                                # Cuando falta menos de 1 día, la volatilidad es ruido. IGNORAMOS Z-SCORES.
+                                # 2. REGLAS ESTADÍSTICAS INTELIGENTES (FASE 24H - 120H)
+                                # Adaptamos la codicia según lo cerca que estemos del final.
                                 # ------------------------------------------------------------------------------
                                 
                                 elif hours_left > 24.0:
                                     
-                                    # Tesoro Paranoico (Scalping)
-                                    if profit_pct > 1.5 and z_score > 0.9:
-                                        should_sell = True; sell_reason = "Paranoid Treasure (Early)"
+                                    # Definir Umbral de Venta (Techo de Cristal)
+                                    # > 48h: Mercado tranquilo, vendemos rápido (1.3)
+                                    # 24h-48h: Mercado caliente, dejamos correr ganancias (2.1)
+                                    profit_threshold = 1.3 if hours_left > 48.0 else 2.1
                                     
-                                    # Protección de Beneficios
-                                    elif profit_pct > 0.0 and z_score > 1.3:
-                                        should_sell = True; sell_reason = "Protect Profit (Early)"
+                                    # Tesoro Paranoico (Si ganamos +150%, aseguramos aunque el Z sea bajo)
+                                    if profit_pct > 1.5 and z_score > 0.9:
+                                        should_sell = True; sell_reason = "Paranoid Treasure (Secured)"
+                                    
+                                    # Protección de Beneficios Dinámica
+                                    # Solo vendemos si ganamos dinero Y el precio se ha disparado irracionalmente
+                                    elif profit_pct > 0.05 and z_score > profit_threshold:
+                                        should_sell = True
+                                        sell_reason = f"Protect Profit (Mid-Game Z{profit_threshold})"
 
                                         # 5. STOP LOSS INTELIGENTE (PENNY STOCK PROTECTION V12.26)
                                     # ----------------------------------------------------------------------
