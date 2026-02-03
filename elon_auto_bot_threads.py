@@ -556,23 +556,97 @@ def run():
                     m_clob = next((c for c in clob_data if titles_match_paranoid(m_poly['title'], c['title'])), None)
                     if not m_clob: continue
 
-                    # PREDICCIÓN
-                    base_sims = brain.predict(ts_list, m_poly['hours'])
-                    pred_mean_hawkes = m_poly['count'] + np.mean(base_sims) * bio_mult
+
+                    # ==============================================================
+
+                    # ==============================================================
+                    # 🧠 NUEVO CEREBRO V2 (SMART MOMENTUM) - REEMPLAZO TOTAL
+                    # ==============================================================
+                    # Sustituye a brain.predict para evitar "alucinaciones" alcistas.
                     
-                    market_buckets = [b for b in m_clob['buckets'] if b.get('bid',0) > 0.01]
-                    consensus = 0
-                    if market_buckets:
-                        consensus = sum([(b['min']+b['max'])/2 * b['bid'] for b in market_buckets]) / sum([b['bid'] for b in market_buckets])
+                    try:
+                        # 1. Datos Base
+                        p_count = m_poly.get('count', 0)
+                        p_hours_left = m_poly.get('hours', 24.0)
+                        p_avg_hist = m_poly.get('daily_avg', 45.0) 
+                        
+                        # Duración estimada (para calcular ritmo actual)
+                        total_duration = 168.0 if p_hours_left > 72 else (48.0 if p_hours_left < 40 else 72.0)
+                        hours_elapsed = max(1.0, total_duration - p_hours_left)
+                        
+                        # 2. Ritmos
+                        rate_actual_diario = (p_count / hours_elapsed) * 24.0
+                        
+                        # 3. Factor de Tendencia
+                        trend_ratio = rate_actual_diario / p_avg_hist if p_avg_hist > 0 else 1.0
+                        
+                        # 4. Asignación de Pesos (Bipolar)
+                        if trend_ratio < 0.60:
+                            # 🐻 MODO OSO: Ignoramos historia, creemos en el silencio actual.
+                            weight_now = 0.90
+                        elif trend_ratio > 1.30:
+                            # 🚀 MODO BURST: Ignoramos historia, creemos en la explosión.
+                            weight_now = 1.00
+                        else:
+                            # ⚖️ MODO NORMAL: Mezcla equilibrada
+                            weight_now = 0.50
+
+                        # 5. Cálculo de la Nueva Media
+                        final_rate_blended = (rate_actual_diario * weight_now) + (p_avg_hist * (1 - weight_now))
+                        final_mean = p_count + (final_rate_blended / 24.0 * p_hours_left)
+                        
+                        # (Opcional) Si quieres mantener un poco de respeto al mercado (Consensus),
+                        # pero solo si NO estamos en Modo Oso. En Modo Oso, el mercado suele equivocarse.
+                        if trend_ratio >= 0.60:
+                             market_buckets = [b for b in m_clob['buckets'] if b.get('bid',0) > 0.01]
+                             if market_buckets:
+                                 consensus = sum([(b['min']+b['max'])/2 * b['bid'] for b in market_buckets]) / sum([b['bid'] for b in market_buckets])
+                                 # Mezcla suave (20% mercado)
+                                 final_mean = (final_mean * 0.8) + (consensus * 0.2)
+
+                    except Exception as e:
+                        # Fallback de seguridad
+                        final_mean = p_count + (p_count/max(1, (168-p_hours_left)) * p_hours_left)
+
+                    # ==============================================================
+                    # 📉 FIX 1: SIGMA SINTÉTICA (Sin base_sims)
+                    # ==============================================================
+                    # Como ya no simulamos 1000 escenarios, estimamos la volatilidad matemática.
+                    # En procesos de conteo (Poisson), Sigma es aprox la Raíz Cuadrada de la Media.
                     
-                    final_mean = pred_mean_hawkes
-                    if consensus > 0:
-                        final_mean = (pred_mean_hawkes * (1-MARKET_WEIGHT)) + (consensus * MARKET_WEIGHT)
+                    # 1. Volatilidad Base (Raíz de la media * Factor de Caos de Elon)
+                    # Usamos 1.5 como factor de seguridad porque Elon es más volátil que una media normal.
+                    raw_sigma = (final_mean ** 0.5) * 1.5 if final_mean > 0 else 5.0
                     
-                    # FIX 1: SIGMA DINÁMICA
-                    if m_poly['hours'] < 2.0: std_floor = 0.5 
-                    else: std_floor = 5.0
-                    eff_std = max(np.std(base_sims), std_floor)
+                    # 2. Sigma Decay (La incertidumbre baja conforme se acaba el tiempo)
+                    # Si queda mucho tiempo, sigma es alta. Si queda poco, baja.
+                    time_factor = (m_poly['hours'] / 168.0) ** 0.5
+                    time_factor = max(0.2, min(1.0, time_factor)) # Limitamos entre 20% y 100%
+                    
+                    # 3. Cálculo Final (Con suelo mínimo de seguridad)
+                    eff_std = max(raw_sigma * time_factor, 3.0)
+                    
+                    # ==============================================================
+                    
+                    # ==============================================================
+
+                    # # PREDICCIÓN
+                    # base_sims = brain.predict(ts_list, m_poly['hours'])
+                    # pred_mean_hawkes = m_poly['count'] + np.mean(base_sims) * bio_mult
+                    
+                    # market_buckets = [b for b in m_clob['buckets'] if b.get('bid',0) > 0.01]
+                    # consensus = 0
+                    # if market_buckets:
+                    #     consensus = sum([(b['min']+b['max'])/2 * b['bid'] for b in market_buckets]) / sum([b['bid'] for b in market_buckets])
+                    
+                    # final_mean = pred_mean_hawkes
+                    # if consensus > 0:
+                    #     final_mean = (pred_mean_hawkes * (1-MARKET_WEIGHT)) + (consensus * MARKET_WEIGHT)
+                    
+                     # FIX 1: SIGMA DINÁMICA
+                    # if m_poly['hours'] < 2.0: std_floor = 0.5 
+                    # else: std_floor = 5.0
+                    # eff_std = max(np.std(base_sims), std_floor)
 
                     d_avg = m_poly.get('daily_avg', 0)
                     hours_left = m_poly.get('hours', 0)
