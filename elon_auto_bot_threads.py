@@ -569,10 +569,19 @@ def run():
                         p_count = m_poly.get('count', 0)
                         p_hours_left = m_poly.get('hours', 24.0)
                         p_avg_hist = m_poly.get('daily_avg', 45.0) 
-                        
-                        # Duración estimada (para calcular ritmo actual)
-                        total_duration = 168.0 if p_hours_left > 72 else (48.0 if p_hours_left < 40 else 72.0)
+
+                        # --- FIX CRÍTICO DURACIÓN ---
+                        # Si ya hay muchos tweets (>130), DEBE ser un evento semanal (168h),
+                        # independientemente de las horas que queden.
+                        if p_count > 130 or p_hours_left > 72:
+                            total_duration = 168.0
+                        elif p_hours_left < 40:
+                            total_duration = 48.0
+                        else:
+                            total_duration = 72.0
+                            
                         hours_elapsed = max(1.0, total_duration - p_hours_left)
+                        # -----------------------------
                         
                         # 2. Ritmos
                         rate_actual_diario = (p_count / hours_elapsed) * 24.0
