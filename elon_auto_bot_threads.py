@@ -765,9 +765,9 @@ def run():
 
                                 # B) VICTORY LAP (Asegurar Ganancia Final)
                                 # Si estamos en la recta final y el precio ya es casi $1.00, vendemos.
-                                elif hours_left <= 48.0 and bid > 0.95:
+                                elif hours_left <= 48.0 and bid > 0.98:
                                     should_sell = True
-                                    sell_reason = f"Victory Lap (Price {bid:.2f} > 0.95)"
+                                    sell_reason = f"Victory Lap (Price {bid:.2f} > 0.98)"
 
                                 # ------------------------------------------------------------------------------
                                 # 2. REGLAS ESTADÍSTICAS INTELIGENTES (FASE 24H - 120H)
