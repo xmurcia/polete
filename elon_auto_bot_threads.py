@@ -678,7 +678,7 @@ def run():
                         # 0. DEFINICIÓN DE VARIABLES DE ENTORNO (WARM-UP)
                         # ==============================================================
                         # Definimos IS_WARMUP para usarlo luego en la lógica de compra
-                        min_req = 10 if m_poly['hours'] > 72.0 else 4
+                        min_req = 35 if m_poly['hours'] > 72.0 else 12
                         IS_WARMUP = m_poly['count'] < min_req
 
                         # ==============================================================
