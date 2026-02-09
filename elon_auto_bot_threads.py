@@ -783,9 +783,9 @@ def run():
                                 elif hours_left > 24.0:
                                     
                                     # Definir Umbral de Venta (Techo de Cristal)
-                                    # > 48h: Mercado tranquilo, vendemos rápido (1.3)
-                                    # 24h-48h: Mercado caliente, dejamos correr ganancias (2.1)
-                                    profit_threshold = 1.3 if hours_left > 48.0 else 2.1
+                                    # > 48h: Mercado tranquilo, vendemos rápido (1.5)
+                                    # 24h-48h: Mercado caliente, dejamos correr ganancias (2.4)
+                                    profit_threshold = 1.5 if hours_left > 48.0 else 2.4
                                     
                                     # Tesoro Paranoico (Si ganamos +150%, aseguramos aunque el Z sea bajo)
                                     if profit_pct > 1.5 and z_score > 0.9:
@@ -803,7 +803,7 @@ def run():
                                     # REGLA DE HOLGURA:
                                     if avg_entry < 0.05: sl_limit = -0.75
                                     elif avg_entry < 0.10: sl_limit = -0.60
-                                    else: sl_limit = -0.30
+                                    else: sl_limit = -0.40
 
                                     # REGLA DE TIEMPO (IRON HANDS):
                                     if hours_left < 48.0: sl_limit = -2.0
@@ -813,9 +813,14 @@ def run():
                                         should_sell = True
                                         sell_reason = f"Stop Loss Adaptativo (Hit {profit_pct*100:.1f}% vs Limit {sl_limit*100:.0f}%)"
                                     
-                                    # Pánico Global
-                                    elif z_score > 2.0:
-                                        should_sell = True; sell_reason = "Panic Exit (Volatility)"
+                                    # Pánico Global (V16 - ANTI-CHURNING EXTREMO)
+                                    # Solo vendemos si el mercado está ROTO (Z > 8.0).
+                                    # En el backtest, Z suele estar entre 2 y 5.
+                                    # En el problema de hoy, Z estaba en 14.1.
+                                    # Poniendo el límite en 8.0, evitamos vender en volatilidad normal
+                                    # pero cortamos la hemorragia en casos extremos.
+                                    elif z_score > 8.0 and profit_pct < 0.10:
+                                        should_sell = True; sell_reason = "Extreme Panic (Z>8)"
 
                                 # ------------------------------------------------------------------------------
                                 # EJECUCIÓN
@@ -852,8 +857,8 @@ def run():
 
                             if not is_impossible:
                                 # === FIX CRÍTICO ANTI-CHURN ===
-                                # Solo entramos si el Z-Score es muy bajo (0.8) para tener margen de subida
-                                if z_score <= 0.8 and ask >= MIN_PRICE_ENTRY:
+                                # Solo entramos si el Z-Score es muy bajo (0.85) para tener margen de subida
+                                if z_score <= 0.85 and ask >= MIN_PRICE_ENTRY:
                                     is_neighbor = True
                                     if ENABLE_CLUSTERING and my_buckets:
                                         is_neighbor = any(abs(mid - ov) <= CLUSTER_RANGE for ov in my_buckets)
