@@ -675,6 +675,13 @@ def run():
                         if b['max'] < m_poly['count']: continue 
 
                         # ==============================================================
+                        # 0. DEFINICIÓN DE VARIABLES DE ENTORNO (WARM-UP)
+                        # ==============================================================
+                        # Definimos IS_WARMUP para usarlo luego en la lógica de compra
+                        min_req = 10 if m_poly['hours'] > 72.0 else 4
+                        IS_WARMUP = m_poly['count'] < min_req
+
+                        # ==============================================================
                         # ❄️ COOLDOWN CHECK: El filtro de seguridad
                         # ==============================================================
                         if b['bucket'] in stop_loss_cooldowns:
@@ -693,8 +700,6 @@ def run():
                         # 📉 V13 SIGMA DECAY: Colapso de Varianza Temporal
                         # ==============================================================
                         # A medida que se acaba el tiempo, la campana de Gauss debe estrecharse.
-                        # Si no hacemos esto, el bot sobrevalora buckets lejanos al final.
-                        
                         if b['max'] >= 99999: mid = b['min'] + 20
                         else: mid = (b['min'] + b['max']) / 2
                         
@@ -702,17 +707,11 @@ def run():
                         h_left = m_poly.get('hours', 24.0)
                         
                         # 2. Factor de Decaimiento (Raíz Cuadrada del Tiempo)
-                        # Base 72h (3 días). 
-                        # - Si faltan 72h -> Factor 1.0 (Volatilidad total)
-                        # - Si faltan 18h -> Factor 0.5 (Mitad de volatilidad)
+                        # Base 72h. Faltan 72h -> Factor 1.0. Faltan 18h -> Factor 0.5.
                         decay_factor = (h_left / 72.0) ** 0.5
+                        decay_factor = max(0.25, min(1.0, decay_factor)) # Clamp 25% min
                         
-                        # 3. Clamp (Suelo de seguridad)
-                        # Nunca bajamos del 25% de la volatilidad original para evitar división por cero
-                        # o excesiva confianza ante cisnes negros.
-                        decay_factor = max(0.25, min(1.0, decay_factor))
-                        
-                        # 4. Sigma Ajustada (Esta es la clave del V13)
+                        # 3. Sigma Ajustada (Esta es la clave del V13)
                         decayed_std = eff_std * decay_factor
                         
                         # --------------------------------------------------------------
@@ -730,15 +729,19 @@ def run():
                         
                         # --- MOTOR ---
                         owned = any([x for x in trader.portfolio['positions'].values() 
-                                     if x['bucket'] == b['bucket'] and titles_match_paranoid(x['market'], m_poly['title'])])
+                                     if x['bucket'] == b['bucket'] and trader._clean_name(x['market']) == trader._clean_name(m_poly['title'])])
                         
+                        # Identificamos si tenemos algún bucket vecino (para clustering)
+                        my_buckets = trader.get_owned_buckets_val(m_poly['title'])
+
                         if owned:
                             pos_data = next((v for k,v in trader.portfolio['positions'].items() if v['bucket'] == b['bucket']), None)
                             if pos_data:
                                 entry = pos_data['entry_price']
                                 profit_pct = (bid - entry) / entry if entry > 0 else 0
+                                
                                 # ==============================================================================
-                                # LÓGICA DE SALIDA V12.24 - PROTOCOLO "IRON HANDS" (FINAL DE EVENTO)
+                                # LÓGICA DE SALIDA V13.1 (CONFIGURACIÓN GANADORA SHARPE 2.49)
                                 # ==============================================================================
                                 
                                 should_sell = False
@@ -752,7 +755,7 @@ def run():
                                 if hours_left > 24.0: safety_threshold = 20
                                 elif hours_left > 12.0: safety_threshold = 15
                                 elif hours_left > 6.0: safety_threshold = 12
-                                else: safety_threshold = 10
+                                else: safety_threshold = 10 # <--- AJUSTE DEFENSIVO FINAL
 
                                 # ------------------------------------------------------------------------------
                                 # 1. REGLAS FUNDAMENTALES (SIEMPRE ACTIVAS - PRIORIDAD ABSOLUTA)
@@ -786,35 +789,24 @@ def run():
                                         should_sell = True; sell_reason = "Paranoid Treasure (Secured)"
                                     
                                     # Protección de Beneficios Dinámica
-                                    # Solo vendemos si ganamos dinero Y el precio se ha disparado irracionalmente
                                     elif profit_pct > 0.05 and z_score > profit_threshold:
                                         should_sell = True
                                         sell_reason = f"Protect Profit (Mid-Game Z{profit_threshold})"
 
-                                        # 5. STOP LOSS INTELIGENTE (PENNY STOCK PROTECTION V12.26)
+                                    # 5. STOP LOSS INTELIGENTE (PENNY STOCK PROTECTION V12.26)
                                     # ----------------------------------------------------------------------
-                                    # Calculamos el precio de entrada para saber si es "Bucket Basura" o "Bucket Bueno"
-                                    # (Si no tenemos el dato directo, lo deducimos del profit)
                                     avg_entry = bid / (1 + profit_pct) if (1 + profit_pct) != 0 else bid
                                     
                                     # REGLA DE HOLGURA:
-                                    # Si costó menos de 5 céntimos, aguantamos hasta morir (-75%).
-                                    # Si costó menos de 10 céntimos, aguantamos mucho (-60%).
-                                    # Si costó más, protegemos normal (-30%).
-                                    if avg_entry < 0.05:
-                                        sl_limit = -0.75
-                                    elif avg_entry < 0.10:
-                                        sl_limit = -0.60
-                                    else:
-                                        sl_limit = -0.30
+                                    if avg_entry < 0.05: sl_limit = -0.75
+                                    elif avg_entry < 0.10: sl_limit = -0.60
+                                    else: sl_limit = -0.30
 
                                     # REGLA DE TIEMPO (IRON HANDS):
-                                    # Si falta menos de 48h, desactivamos el Stop Loss (-200%) para aguantar volatilidad final.
-                                    if hours_left < 48.0:
-                                        sl_limit = -2.0
+                                    if hours_left < 48.0: sl_limit = -2.0
 
                                     # EJECUCIÓN
-                                    elif profit_pct < sl_limit and z_score > 1.3:
+                                    if profit_pct < sl_limit and z_score > 1.3:
                                         should_sell = True
                                         sell_reason = f"Stop Loss Adaptativo (Hit {profit_pct*100:.1f}% vs Limit {sl_limit*100:.0f}%)"
                                     
@@ -835,37 +827,29 @@ def run():
                             # ==============================================================================
                             # 🛡️ FILTRO ANTI-KAMIKAZE (IMPEDIR ENTRADA EN ZONA DE PELIGRO)
                             # ==============================================================================
-                            # Si la lógica de venta dice "Vende por peligro", la de compra debe decir "No entres".
-                            
                             bucket_headroom = b['max'] - m_poly['count']
                             hours_left = m_poly['hours']
                             
                             # Mismos umbrales que usamos para vender (Sincronización total)
                             if hours_left > 24.0: buy_safety = 20
                             elif hours_left > 12.0: buy_safety = 15
-                            elif hours_left > 6.0: buy_safety = 10
-                            elif hours_left > 1.0: buy_safety = 5
+                            elif hours_left > 6.0: buy_safety = 12
+                            elif hours_left > 1.0: buy_safety = 10
                             else: buy_safety = 2
                             
                             # Si el margen es menor que la seguridad, BLOQUEAMOS LA COMPRA
                             if bucket_headroom < buy_safety:
-                                # print(f"🚫 SKIP BUY {b['bucket']}: Zona Peligrosa ({bucket_headroom} tweets margen)")
                                 continue
-                            # ==============================================================================
                             
-                            # --- FIX 2: REALITY CHECK ---
+                            # --- REALITY CHECK ---
                             is_impossible = False
                             if m_poly['hours'] < 1.0:
                                 tweets_needed = b['min'] - m_poly['count']
                                 if tweets_needed > (m_poly['hours'] * 15): is_impossible = True
 
                             if not is_impossible:
-                                # === FIX CRÍTICO V12.16 (ANTI-CHURN) ===
-                                # Antes: if z_score <= MAX_Z_SCORE_ENTRY
-                                # Ahora: if z_score <= 0.8
-                                # Explicación: Si nuestro Stop Loss salta en 1.3, NO PODEMOS comprar en 1.5.
-                                # Ponemos el techo de compra en 0.8 para dejar un margen de seguridad.
-                                
+                                # === FIX CRÍTICO ANTI-CHURN ===
+                                # Solo entramos si el Z-Score es muy bajo (0.8) para tener margen de subida
                                 if z_score <= 0.8 and ask >= MIN_PRICE_ENTRY:
                                     is_neighbor = True
                                     if ENABLE_CLUSTERING and my_buckets:
