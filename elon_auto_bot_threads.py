@@ -728,8 +728,11 @@ def run():
                         reason = ""
                         
                         # --- MOTOR ---
+                        # Definimos una limpieza rápida local para evitar errores de atributo
+                        clean_fn = lambda s: s.lower().replace("?", "").replace("  ", " ").strip()
+                        
                         owned = any([x for x in trader.portfolio['positions'].values() 
-                                     if x['bucket'] == b['bucket'] and trader._clean_name(x['market']) == trader._clean_name(m_poly['title'])])
+                                     if x['bucket'] == b['bucket'] and clean_fn(x['market']) == clean_fn(m_poly['title'])])
                         
                         # Identificamos si tenemos algún bucket vecino (para clustering)
                         my_buckets = trader.get_owned_buckets_val(m_poly['title'])
