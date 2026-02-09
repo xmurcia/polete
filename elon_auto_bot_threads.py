@@ -751,8 +751,8 @@ def run():
                                 # Umbral de seguridad dinámico (Tweets restantes necesarios)
                                 if hours_left > 24.0: safety_threshold = 20
                                 elif hours_left > 12.0: safety_threshold = 15
-                                elif hours_left > 6.0: safety_threshold = 10
-                                else: safety_threshold = 5
+                                elif hours_left > 6.0: safety_threshold = 12
+                                else: safety_threshold = 10
 
                                 # ------------------------------------------------------------------------------
                                 # 1. REGLAS FUNDAMENTALES (SIEMPRE ACTIVAS - PRIORIDAD ABSOLUTA)
