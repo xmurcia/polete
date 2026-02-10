@@ -32,7 +32,7 @@ if not os.path.exists(SNAPSHOTS_DIR): os.makedirs(SNAPSHOTS_DIR)
 if not os.path.exists(MARKET_TAPE_DIR): os.makedirs(MARKET_TAPE_DIR)
 
 # --- AJUSTES V11 (SOLO PARAMETROS) ---
-MAX_Z_SCORE_ENTRY = 1.6
+MAX_Z_SCORE_ENTRY = 0.85
 MIN_PRICE_ENTRY = 0.02
 ENABLE_CLUSTERING = True
 CLUSTER_RANGE = 40
@@ -589,16 +589,17 @@ def run():
                         # 3. Factor de Tendencia
                         trend_ratio = rate_actual_diario / p_avg_hist if p_avg_hist > 0 else 1.0
                         
-                        # 4. Asignación de Pesos (Bipolar)
-                        if trend_ratio < 0.60:
-                            # 🐻 MODO OSO: Ignoramos historia, creemos en el silencio actual.
-                            weight_now = 0.90
-                        elif trend_ratio > 1.30:
-                            # 🚀 MODO BURST: Ignoramos historia, creemos en la explosión.
-                            weight_now = 1.00
-                        else:
-                            # ⚖️ MODO NORMAL: Mezcla equilibrada
-                            weight_now = 0.50
+                       # LÓGICA DE PESOS (REGRESIÓN A LA MEDIA)
+                        if trend_ratio < 0.60: 
+                            weight_now = 0.90 # Si va muy lento, creemos que está dormido (peso alto al presente)
+                        elif trend_ratio > 1.30: 
+                            # RAGE MODE: Elon está tuiteando como loco.
+                            # Si falta mucho (>24h), no creemos que aguante este ritmo. Mezclamos con historia.
+                            if p_hours_left > 24.0: weight_now = 0.65 
+                            # Si es el sprint final (<24h), nos creemos el hype totalmente.
+                            else: weight_now = 0.85
+                        else: 
+                            weight_now = 0.50 # Ritmo normal, mezcla equilibrada
 
                         # 5. Cálculo de la Nueva Media
                         final_rate_blended = (rate_actual_diario * weight_now) + (p_avg_hist * (1 - weight_now))
@@ -857,8 +858,8 @@ def run():
 
                             if not is_impossible:
                                 # === FIX CRÍTICO ANTI-CHURN ===
-                                # Solo entramos si el Z-Score es muy bajo (0.85) para tener margen de subida
-                                if z_score <= 0.85 and ask >= MIN_PRICE_ENTRY:
+                                # Solo entramos si el Z-Score es muy bajo para tener margen de subida
+                                if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
                                     is_neighbor = True
                                     if ENABLE_CLUSTERING and my_buckets:
                                         is_neighbor = any(abs(mid - ov) <= CLUSTER_RANGE for ov in my_buckets)
