@@ -556,67 +556,95 @@ def run():
                     m_clob = next((c for c in clob_data if titles_match_paranoid(m_poly['title'], c['title'])), None)
                     if not m_clob: continue
 
-
                     # ==============================================================
-
+                    # 🧠 CEREBRO V21: AUTOMATIC FATIGUE (SIN MANUAL)
                     # ==============================================================
-                    # 🧠 NUEVO CEREBRO V2 (SMART MOMENTUM) - REEMPLAZO TOTAL
-                    # ==============================================================
-                    # Sustituye a brain.predict para evitar "alucinaciones" alcistas.
                     
                     try:
-                        # 1. Datos Base
+                        # --- 1. DATOS BASE ---
                         p_count = m_poly.get('count', 0)
                         p_hours_left = m_poly.get('hours', 24.0)
-                        p_avg_hist = m_poly.get('daily_avg', 45.0) 
+                        p_avg_hist = m_poly.get('daily_avg', 45.0)
 
-                        # --- FIX CRÍTICO DURACIÓN ---
-                        # Si ya hay muchos tweets (>130), DEBE ser un evento semanal (168h),
-                        # independientemente de las horas que queden.
-                        if p_count > 130 or p_hours_left > 72:
-                            total_duration = 168.0
-                        elif p_hours_left < 40:
-                            total_duration = 48.0
-                        else:
-                            total_duration = 72.0
-                            
-                        hours_elapsed = max(1.0, total_duration - p_hours_left)
-                        # -----------------------------
+                        # Fix de Duración del Evento (Semanal vs Diario)
+                        if p_count > 130 or p_hours_left > 72: total_duration = 168.0
+                        elif p_hours_left < 40: total_duration = 48.0
+                        else: total_duration = 72.0
                         
-                        # 2. Ritmos
+                        hours_elapsed = max(1.0, total_duration - p_hours_left)
                         rate_actual_diario = (p_count / hours_elapsed) * 24.0
                         
-                        # 3. Factor de Tendencia
-                        trend_ratio = rate_actual_diario / p_avg_hist if p_avg_hist > 0 else 1.0
+                        # --- 2. CÁLCULO DE FATIGA AUTOMÁTICA ---
+                        # En lugar de un botón manual, usamos el tiempo restante como filtro.
+                        # Cuanto más tiempo falta, menos peso le damos a la "locura" actual.
                         
-                       # LÓGICA DE PESOS (REGRESIÓN A LA MEDIA)
-                        if trend_ratio < 0.60: 
-                            weight_now = 0.90 # Si va muy lento, creemos que está dormido (peso alto al presente)
-                        elif trend_ratio > 1.30: 
-                            # RAGE MODE: Elon está tuiteando como loco.
-                            # Si falta mucho (>24h), no creemos que aguante este ritmo. Mezclamos con historia.
-                            if p_hours_left > 24.0: weight_now = 0.65 
-                            # Si es el sprint final (<24h), nos creemos el hype totalmente.
-                            else: weight_now = 0.85
-                        else: 
-                            weight_now = 0.50 # Ritmo normal, mezcla equilibrada
+                        if p_hours_left < 6.0:
+                            # SPRINT FINAL: Creemos en el momentum casi al 100%.
+                            # Si va rápido ahora, acabará rápido.
+                            fatigue_weight = 0.95 
+                            mode_tag = "🚀 SPRINT"
+                        
+                        elif p_hours_left < 24.0:
+                            # INTRADÍA: Le creemos bastante, pero asumimos pausas para comer/dormir.
+                            fatigue_weight = 0.75
+                            mode_tag = "🏃 RUN"
+                            
+                        else:
+                            # SEMANAL / LARGO PLAZO: La gravedad es fuerte.
+                            # Aunque hoy esté loco, la media histórica pesa mucho más.
+                            # Esto es lo que arregla la predicción de 615 tweets.
+                            fatigue_weight = 0.35 
+                            mode_tag = "⚓ MARATHON"
 
-                        # 5. Cálculo de la Nueva Media
-                        final_rate_blended = (rate_actual_diario * weight_now) + (p_avg_hist * (1 - weight_now))
-                        final_mean = p_count + (final_rate_blended / 24.0 * p_hours_left)
+                        # --- 3. PROYECCIÓN PONDERADA ---
+                        # Mezclamos la velocidad actual con la historia según la fatiga
+                        projected_rate = (rate_actual_diario * fatigue_weight) + (p_avg_hist * (1 - fatigue_weight))
                         
-                        # (Opcional) Si quieres mantener un poco de respeto al mercado (Consensus),
-                        # pero solo si NO estamos en Modo Oso. En Modo Oso, el mercado suele equivocarse.
-                        if trend_ratio >= 0.60:
-                             market_buckets = [b for b in m_clob['buckets'] if b.get('bid',0) > 0.01]
-                             if market_buckets:
-                                 consensus = sum([(b['min']+b['max'])/2 * b['bid'] for b in market_buckets]) / sum([b['bid'] for b in market_buckets])
-                                 # Mezcla suave (20% mercado)
-                                 final_mean = (final_mean * 0.8) + (consensus * 0.2)
+                        # CAP DE SEGURIDAD (SOLO PARA LARGO PLAZO)
+                        # Si falta más de un día, prohibido proyectar más de 3x la media histórica.
+                        # Esto evita que un mal día rompa la estadística de la semana.
+                        if p_hours_left > 24.0:
+                            max_rate_allowed = p_avg_hist * 3.0 
+                            projected_rate = min(projected_rate, max_rate_allowed)
+
+                        # Cálculo de la Media Final
+                        mean_prediction = p_count + (projected_rate / 24.0 * p_hours_left)
+                        
+                        # --- 4. CONTROL DE REALIDAD (MERCADO) ---
+                        # Si nuestra predicción se desvía brutalmente del mercado, corregimos hacia el consenso.
+                        # Esto evita que compremos buckets 580+ cuando todo el mundo compra 450.
+                        final_mean = mean_prediction # Por defecto
+                        
+                        try:
+                            # Miramos dónde está el dinero en el Order Book
+                            market_buckets = [b for b in m_clob.get('buckets', []) if b['bid'] > 0.05] # Buckets con liquidez real
+                            if market_buckets and p_hours_left > 12.0:
+                                # Calculamos el "Centro de Gravedad" del mercado
+                                w_sum = sum([(b['min']+b['max'])/2 * b['bid'] for b in market_buckets])
+                                w_vol = sum([b['bid'] for b in market_buckets])
+                                if w_vol > 0:
+                                    consensus = w_sum / w_vol
+                                    
+                                    # Si estamos muy lejos (>15%) del consenso, promediamos
+                                    if abs(final_mean - consensus) > (consensus * 0.15):
+                                        final_mean = (final_mean * 0.6) + (consensus * 0.4)
+                                        mode_tag += "+MKT"
+                        except: pass
+
+                        # --- 5. SIGMA ADAPTATIVA ---
+                        # Si es un evento largo, sigma más alta (incertidumbre). Si es corto, más baja.
+                        raw_sigma = (final_mean ** 0.5) * 1.5
+                        time_factor = (p_hours_left / 168.0) ** 0.5
+                        eff_std = max(raw_sigma * max(0.3, time_factor), 3.0)
+                        
+                        # Etiqueta para el log
+                        brain_mode = f"🧠 {mode_tag}"
 
                     except Exception as e:
-                        # Fallback de seguridad
-                        final_mean = p_count + (p_count/max(1, (168-p_hours_left)) * p_hours_left)
+                        print(f"Brain Error: {e}")
+                        final_mean = p_count + (p_avg_hist/24.0 * p_hours_left)
+                        eff_std = 5.0
+                        brain_mode = "ERROR"
 
                     # ==============================================================
                     # 📉 FIX 1: SIGMA SINTÉTICA (Sin base_sims)
@@ -666,7 +694,8 @@ def run():
 
                     print("-" * 65)
                     print(f">>> {m_poly['title']}")
-                    print(f"    Tweets: {m_poly['count']} (Avg: {d_avg:.1f}/d) | ⏳ Quedan: {time_str} | 🧠 Híbrido: {final_mean:.1f} (σ={eff_std:.1f})")
+                    time_str = f"{p_hours_left/24:.1f}d" if p_hours_left > 24 else f"{p_hours_left:.1f}h"
+                    print(f"    Tweets: {m_poly['count']} | ⏳ {time_str} | {brain_mode}: {final_mean:.1f} (σ={eff_std:.1f})")
                     print("-" * 65)
                     print(f"{'BUCKET':<10} | {'BID':<6} | {'ASK':<6} | {'FAIR':<6} | {'Z-SCR':<6} | {'ACTION'}")
 
