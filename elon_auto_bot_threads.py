@@ -34,7 +34,7 @@ if not os.path.exists(MARKET_TAPE_DIR): os.makedirs(MARKET_TAPE_DIR)
 # --- AJUSTES V11 (SOLO PARAMETROS) ---
 MAX_Z_SCORE_ENTRY = 0.85
 MIN_PRICE_ENTRY = 0.02
-ENABLE_CLUSTERING = True
+ENABLE_CLUSTERING = True # (Dejado en True, pero la lógica ahora es permisiva)
 CLUSTER_RANGE = 40
 MARKET_WEIGHT = 0.70
 
@@ -368,7 +368,7 @@ class PaperTrader:
         row = f"{ts},{action},{market_clean},{bucket},{price:.3f},{shares:.1f},{reason_clean},{pnl:.2f},{self.portfolio['cash']:.2f}\n"
         with open(self.log_path, "a", encoding='utf-8') as f: f.write(row)
 
-    # Helper V11 para saber qué buckets tenemos
+    # Helper V11 para saber qué buckets tenemos (MANTENIDO PERO NO USADO EN EL CORE LOOP)
     def get_owned_buckets_val(self, market_title):
         vals = []
         for k, v in self.portfolio['positions'].items():
@@ -456,10 +456,10 @@ class MarketPanicSensor:
         return alerts
 
 # ==========================================
-# 6. DIRECTOR (V12.15 - ACTIVE BUCKET SAFETY)
+# 6. DIRECTOR (V12.16 - ACCUMULATION RESTORED)
 # ==========================================
 def run():
-    print("\n🤖 ELON-BOT V12.16 (ACTIVE SAFETY + COOLDOWN MODE)")
+    print("\n🤖 ELON-BOT V12.16 (ACCUMULATION STRATEGY RESTORED)")
     
     # Utiles V10
     def log_monitor(msg):
@@ -507,7 +507,6 @@ def run():
     # ==============================================================================
     # ❄️ INIT COOLDOWNS: Memoria de castigos
     # ==============================================================================
-    # Clave: Nombre del Bucket | Valor: Hora a la que se levanta el castigo (datetime)
     stop_loss_cooldowns = {}
 
     while True:
@@ -559,9 +558,6 @@ def run():
                     # ==============================================================
                     # 🧠 CEREBRO V22: UNIVERSAL SCALE (AGNOSTIC)
                     # ==============================================================
-                    # Aprende el tamaño de los buckets automáticamente.
-                    # Sirve para Elon (pasos de 10/20) o Bitcoin (pasos de 1000).
-                    
                     try:
                         # --- 1. DATOS BASE ---
                         p_count = m_poly.get('count', 0)
@@ -604,50 +600,37 @@ def run():
                             
                             if market_buckets and p_hours_left > 12.0:
                                 # A) APRENDIZAJE: ¿De qué tamaño son los escalones en este mercado?
-                                # (Ej: Elon = 20, Bitcoin = 1000)
                                 bucket_sizes = []
                                 for b in all_buckets:
                                     size = b['max'] - b['min']
-                                    # Filtramos los infinitos (que suelen tener max gigantes)
                                     if size < 100000 and size > 0: 
                                         bucket_sizes.append(size)
                                 
-                                # Calculamos la mediana (el tamaño estándar del paso)
+                                # Calculamos la mediana
                                 if bucket_sizes:
                                     bucket_sizes.sort()
                                     avg_step = bucket_sizes[len(bucket_sizes)//2]
                                 else:
-                                    avg_step = 10.0 # Fallback por seguridad
+                                    avg_step = 10.0 
                                 
                                 # B) CÁLCULO DEL CONSENSO
-                                w_sum = 0
-                                w_vol = 0
-                                
+                                w_sum = 0; w_vol = 0
                                 for b in market_buckets:
-                                    # Detectamos si es un bucket infinito comparándolo con el paso estándar
                                     range_size = b['max'] - b['min']
-                                    
                                     if range_size > (avg_step * 5.0): 
-                                        # Es un bucket infinito (ej: 580+). 
-                                        # Usamos el paso aprendido para estimar el centro.
                                         mid_val = b['min'] + avg_step 
                                     else:
-                                        # Es un bucket normal
                                         mid_val = (b['min'] + b['max']) / 2
-                                    
                                     w_sum += mid_val * b['bid']
                                     w_vol += b['bid']
 
                                 if w_vol > 0:
                                     consensus = w_sum / w_vol
-                                    # Si nos desviamos >15%, corregimos hacia el mercado
                                     if abs(final_mean - consensus) > (consensus * 0.15):
                                         final_mean = (final_mean * 0.6) + (consensus * 0.4)
                                         mode_tag += "+MKT"
                                         
-                        except Exception as e_mkt:
-                            # Si falla el mercado, seguimos con nuestra predicción
-                            pass 
+                        except Exception as e_mkt: pass 
 
                         # --- 5. SIGMA ADAPTATIVA ---
                         raw_sigma = (final_mean ** 0.5) * 1.5
@@ -663,51 +646,13 @@ def run():
                         brain_mode = "⚠️ ERROR"
                         
                     # ==============================================================
-                    # 📉 FIX 1: SIGMA SINTÉTICA (Sin base_sims)
+                    # 📉 FIX 1: SIGMA SINTÉTICA
                     # ==============================================================
-                    # Como ya no simulamos 1000 escenarios, estimamos la volatilidad matemática.
-                    # En procesos de conteo (Poisson), Sigma es aprox la Raíz Cuadrada de la Media.
-                    
-                    # 1. Volatilidad Base (Raíz de la media * Factor de Caos de Elon)
-                    # Usamos 1.5 como factor de seguridad porque Elon es más volátil que una media normal.
                     raw_sigma = (final_mean ** 0.5) * 1.5 if final_mean > 0 else 5.0
-                    
-                    # 2. Sigma Decay (La incertidumbre baja conforme se acaba el tiempo)
-                    # Si queda mucho tiempo, sigma es alta. Si queda poco, baja.
                     time_factor = (m_poly['hours'] / 168.0) ** 0.5
-                    time_factor = max(0.2, min(1.0, time_factor)) # Limitamos entre 20% y 100%
-                    
-                    # 3. Cálculo Final (Con suelo mínimo de seguridad)
+                    time_factor = max(0.2, min(1.0, time_factor)) 
                     eff_std = max(raw_sigma * time_factor, 3.0)
                     
-                    # ==============================================================
-                    
-                    # ==============================================================
-
-                    # # PREDICCIÓN
-                    # base_sims = brain.predict(ts_list, m_poly['hours'])
-                    # pred_mean_hawkes = m_poly['count'] + np.mean(base_sims) * bio_mult
-                    
-                    # market_buckets = [b for b in m_clob['buckets'] if b.get('bid',0) > 0.01]
-                    # consensus = 0
-                    # if market_buckets:
-                    #     consensus = sum([(b['min']+b['max'])/2 * b['bid'] for b in market_buckets]) / sum([b['bid'] for b in market_buckets])
-                    
-                    # final_mean = pred_mean_hawkes
-                    # if consensus > 0:
-                    #     final_mean = (pred_mean_hawkes * (1-MARKET_WEIGHT)) + (consensus * MARKET_WEIGHT)
-                    
-                     # FIX 1: SIGMA DINÁMICA
-                    # if m_poly['hours'] < 2.0: std_floor = 0.5 
-                    # else: std_floor = 5.0
-                    # eff_std = max(np.std(base_sims), std_floor)
-
-                    d_avg = m_poly.get('daily_avg', 0)
-                    hours_left = m_poly.get('hours', 0)
-                    days = int(hours_left // 24)
-                    rem_hours = hours_left % 24
-                    time_str = f"{days}d {rem_hours:.1f}h" if days > 0 else f"{hours_left:.1f}h"
-
                     print("-" * 65)
                     print(f">>> {m_poly['title']}")
                     time_str = f"{p_hours_left/24:.1f}d" if p_hours_left > 24 else f"{p_hours_left:.1f}h"
@@ -715,161 +660,102 @@ def run():
                     print("-" * 65)
                     print(f"{'BUCKET':<10} | {'BID':<6} | {'ASK':<6} | {'FAIR':<6} | {'Z-SCR':<6} | {'ACTION'}")
 
-                    my_buckets = trader.get_owned_buckets_val(m_poly['title'])
+                    # ==============================================================
+                    # 🩹 FIX CRÍTICO DE INVENTARIO (Anti-Amnesia)
+                    # ==============================================================
+                    # Creamos lista manual para saber qué tenemos exactamente.
+                    my_buckets_ids = []
+                    
+                    for pos in trader.portfolio['positions'].values():
+                        if titles_match_paranoid(m_poly['title'], pos['market']):
+                            my_buckets_ids.append(pos['bucket'])
 
                     for b in m_clob['buckets']:
                         if b['max'] < m_poly['count']: continue 
 
-                        # ==============================================================
-                        # 0. DEFINICIÓN DE VARIABLES DE ENTORNO (WARM-UP)
-                        # ==============================================================
-                        # Definimos IS_WARMUP para usarlo luego en la lógica de compra
+                        # 0. WARM-UP
                         min_req = 35 if m_poly['hours'] > 72.0 else 12
                         IS_WARMUP = m_poly['count'] < min_req
 
-                        # ==============================================================
-                        # ❄️ COOLDOWN CHECK: El filtro de seguridad
-                        # ==============================================================
+                        # ❄️ COOLDOWN CHECK
                         if b['bucket'] in stop_loss_cooldowns:
-                            if datetime.now() < stop_loss_cooldowns[b['bucket']]:
-                                # Si quieres ver el log, descomenta:
-                                # unlock_time = stop_loss_cooldowns[b['bucket']].strftime('%H:%M')
-                                # print(f"{b['bucket']:<10} | -      | -      | -      | -      | ❄️ COOLDOWN ({unlock_time})")
-                                continue
-                            else:
-                                # Ya pasó el tiempo, borramos el castigo
-                                del stop_loss_cooldowns[b['bucket']]
+                            if datetime.now() < stop_loss_cooldowns[b['bucket']]: continue
+                            else: del stop_loss_cooldowns[b['bucket']]
                         
                         bid, ask = b.get('bid',0), b.get('ask',0)
+
+                        # ==============================================================
+                        # 🛡️ ESCUDO ANTI-CERO (Protección de Pánico)
+                        # ==============================================================
+                        if bid <= 0.001 and p_hours_left > 2.0: continue 
                         
                         # ==============================================================
-                        # 📉 V13 SIGMA DECAY: Colapso de Varianza Temporal
+                        # 📉 V13 SIGMA DECAY
                         # ==============================================================
-                        # A medida que se acaba el tiempo, la campana de Gauss debe estrecharse.
                         if b['max'] >= 99999: mid = b['min'] + 20
                         else: mid = (b['min'] + b['max']) / 2
                         
-                        # 1. Recuperar horas restantes
                         h_left = m_poly.get('hours', 24.0)
-                        
-                        # 2. Factor de Decaimiento (Raíz Cuadrada del Tiempo)
-                        # Base 72h. Faltan 72h -> Factor 1.0. Faltan 18h -> Factor 0.5.
                         decay_factor = (h_left / 72.0) ** 0.5
-                        decay_factor = max(0.25, min(1.0, decay_factor)) # Clamp 25% min
-                        
-                        # 3. Sigma Ajustada (Esta es la clave del V13)
+                        decay_factor = max(0.25, min(1.0, decay_factor)) 
                         decayed_std = eff_std * decay_factor
                         
-                        # --------------------------------------------------------------
-                        # CÁLCULOS USANDO LA NUEVA SIGMA AJUSTADA
-                        # --------------------------------------------------------------
                         z_score = abs(mid - final_mean) / decayed_std
                         p_min = norm.cdf(b['min'], final_mean, decayed_std)
                         
                         if b['max'] >= 99999: fair = 1.0 - p_min
                         else: fair = norm.cdf(b['max']+1, final_mean, decayed_std) - p_min
-                        # ==============================================================
-
+                        
                         action = "-"
                         reason = ""
-                        
-                        # --- MOTOR ---
-                        # Definimos una limpieza rápida local para evitar errores de atributo
                         clean_fn = lambda s: s.lower().replace("?", "").replace("  ", " ").strip()
                         
-                        owned = any([x for x in trader.portfolio['positions'].values() 
-                                     if x['bucket'] == b['bucket'] and clean_fn(x['market']) == clean_fn(m_poly['title'])])
+                        # USAMOS LA LISTA MANUAL PARA EVITAR DUPLICADOS EXACTOS
+                        owned = b['bucket'] in my_buckets_ids
                         
-                        # Identificamos si tenemos algún bucket vecino (para clustering)
-                        my_buckets = trader.get_owned_buckets_val(m_poly['title'])
-
                         if owned:
                             pos_data = next((v for k,v in trader.portfolio['positions'].items() if v['bucket'] == b['bucket']), None)
                             if pos_data:
                                 entry = pos_data['entry_price']
                                 profit_pct = (bid - entry) / entry if entry > 0 else 0
                                 
-                                # ==============================================================================
-                                # LÓGICA DE SALIDA V13.1 (CONFIGURACIÓN GANADORA SHARPE 2.49)
-                                # ==============================================================================
-                                
                                 should_sell = False
                                 sell_reason = "" 
                                 
-                                # Datos clave
                                 bucket_headroom = b['max'] - m_poly['count']
                                 hours_left = m_poly['hours']
                                 
-                                # Umbral de seguridad dinámico (Tweets restantes necesarios)
                                 if hours_left > 24.0: safety_threshold = 20
                                 elif hours_left > 12.0: safety_threshold = 15
                                 elif hours_left > 6.0: safety_threshold = 12
-                                else: safety_threshold = 10 # <--- AJUSTE DEFENSIVO FINAL
+                                else: safety_threshold = 10 
 
-                                # ------------------------------------------------------------------------------
-                                # 1. REGLAS FUNDAMENTALES (SIEMPRE ACTIVAS - PRIORIDAD ABSOLUTA)
-                                # ------------------------------------------------------------------------------
-
-                                # A) PELIGRO DE PROXIMIDAD (La única razón válida para huir hoy)
+                                # A) PELIGRO DE PROXIMIDAD
                                 if bucket_headroom < safety_threshold and bucket_headroom >= 0:
-                                    should_sell = True
-                                    sell_reason = f"Proximity Danger ({bucket_headroom} left)" 
-
-                                # B) VICTORY LAP (Asegurar Ganancia Final)
-                                # Si estamos en la recta final y el precio ya es casi $1.00, vendemos.
+                                    should_sell = True; sell_reason = f"Proximity Danger ({bucket_headroom} left)" 
+                                # B) VICTORY LAP
                                 elif hours_left <= 48.0 and bid > 0.95:
-                                    should_sell = True
-                                    sell_reason = f"Victory Lap (Price {bid:.2f} > 0.95)"
-
-                                # ------------------------------------------------------------------------------
-                                # 2. REGLAS ESTADÍSTICAS INTELIGENTES (FASE 24H - 120H)
-                                # Adaptamos la codicia según lo cerca que estemos del final.
-                                # ------------------------------------------------------------------------------
+                                    should_sell = True; sell_reason = f"Victory Lap (Price {bid:.2f} > 0.95)"
                                 
                                 elif hours_left > 24.0:
-                                    
-                                    # Definir Umbral de Venta (Techo de Cristal)
-                                    # > 48h: Mercado tranquilo, vendemos rápido (1.5)
-                                    # 24h-48h: Mercado caliente, dejamos correr ganancias (2.4)
                                     profit_threshold = 1.5 if hours_left > 48.0 else 2.4
                                     
-                                    # Tesoro Paranoico (Si ganamos +150%, aseguramos aunque el Z sea bajo)
                                     if profit_pct > 1.5 and z_score > 0.9:
                                         should_sell = True; sell_reason = "Paranoid Treasure (Secured)"
-                                    
-                                    # Protección de Beneficios Dinámica
                                     elif profit_pct > 0.05 and z_score > profit_threshold:
-                                        should_sell = True
-                                        sell_reason = f"Protect Profit (Mid-Game Z{profit_threshold})"
+                                        should_sell = True; sell_reason = f"Protect Profit (Mid-Game Z{profit_threshold})"
 
-                                    # 5. STOP LOSS INTELIGENTE (PENNY STOCK PROTECTION V12.26)
-                                    # ----------------------------------------------------------------------
                                     avg_entry = bid / (1 + profit_pct) if (1 + profit_pct) != 0 else bid
-                                    
-                                    # REGLA DE HOLGURA:
                                     if avg_entry < 0.05: sl_limit = -0.75
                                     elif avg_entry < 0.10: sl_limit = -0.60
                                     else: sl_limit = -0.40
-
-                                    # REGLA DE TIEMPO (IRON HANDS):
                                     if hours_left < 48.0: sl_limit = -2.0
 
-                                    # EJECUCIÓN
                                     if profit_pct < sl_limit and z_score > 1.3:
-                                        should_sell = True
-                                        sell_reason = f"Stop Loss Adaptativo (Hit {profit_pct*100:.1f}% vs Limit {sl_limit*100:.0f}%)"
-                                    
-                                    # Pánico Global (V16 - ANTI-CHURNING EXTREMO)
-                                    # Solo vendemos si el mercado está ROTO (Z > 8.0).
-                                    # En el backtest, Z suele estar entre 2 y 5.
-                                    # En el problema de hoy, Z estaba en 14.1.
-                                    # Poniendo el límite en 8.0, evitamos vender en volatilidad normal
-                                    # pero cortamos la hemorragia en casos extremos.
+                                        should_sell = True; sell_reason = f"Stop Loss Adaptativo (Hit {profit_pct*100:.1f}%)"
                                     elif z_score > 8.0 and profit_pct < 0.10:
                                         should_sell = True; sell_reason = "Extreme Panic (Z>8)"
 
-                                # ------------------------------------------------------------------------------
-                                # EJECUCIÓN
                                 if should_sell:
                                     action = "SMART_ROTATE"; reason = f"{sell_reason} Z{z_score:.1f}"
                                     res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
@@ -878,44 +764,37 @@ def run():
 
                         elif not owned and not IS_WARMUP:
                             
-                            # ==============================================================================
-                            # 🛡️ FILTRO ANTI-KAMIKAZE (IMPEDIR ENTRADA EN ZONA DE PELIGRO)
-                            # ==============================================================================
                             bucket_headroom = b['max'] - m_poly['count']
                             hours_left = m_poly['hours']
                             
-                            # Mismos umbrales que usamos para vender (Sincronización total)
                             if hours_left > 24.0: buy_safety = 20
                             elif hours_left > 12.0: buy_safety = 15
                             elif hours_left > 6.0: buy_safety = 12
                             elif hours_left > 1.0: buy_safety = 10
                             else: buy_safety = 2
                             
-                            # Si el margen es menor que la seguridad, BLOQUEAMOS LA COMPRA
-                            if bucket_headroom < buy_safety:
-                                continue
+                            if bucket_headroom < buy_safety: continue
                             
-                            # --- REALITY CHECK ---
                             is_impossible = False
                             if m_poly['hours'] < 1.0:
                                 tweets_needed = b['min'] - m_poly['count']
                                 if tweets_needed > (m_poly['hours'] * 15): is_impossible = True
 
                             if not is_impossible:
-                                # === FIX CRÍTICO ANTI-CHURN ===
-                                # Solo entramos si el Z-Score es muy bajo para tener margen de subida
+                                # ==========================================================
+                                # 🟢 ESTRATEGIA DE ACUMULACIÓN (+41% ROI RESTORED)
+                                # ==========================================================
+                                # Hemos eliminado el bloqueo de vecinos.
+                                # Si el bucket tiene valor (Z-Score + Edge), SE COMPRA.
+                                # Esto permite construir "Clusters" (ej: 300, 320, 340) naturales.
+                                
                                 if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
-                                    is_neighbor = True
-                                    if ENABLE_CLUSTERING and my_buckets:
-                                        is_neighbor = any(abs(mid - ov) <= CLUSTER_RANGE for ov in my_buckets)
-                                    
                                     edge = fair - ask
-                                    if is_neighbor and edge > 0.05:
+                                    if edge > 0.05:
                                         action = "BUY"; reason = f"Val+{edge:.2f}"
                                         res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
                                         if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
 
-                        # PRINT
                         color_act = f"🟢 {action}" if "BUY" in action else (f"🔴 {action}" if "ROTATE" in action or "PROFIT" in action else "-")
                         bucket_display = f"*{b['bucket']}" if owned else f"{b['bucket']}"
                         print(f"{bucket_display:<10} | {bid:.3f}  | {ask:.3f}  | {fair:.3f}  | {z_score:.1f}   | {color_act} {reason}")
@@ -923,24 +802,15 @@ def run():
             # ==============================================================================
             # 🧼 FIX FINAL: HIGIENE TOTAL DEL PORTFOLIO
             # ==============================================================================
-            
-            # 1. Crear mapa de mercados vivos para acceso rápido
-            #    Clave: Título normalizado -> Valor: Objeto mercado completo (con count)
             live_markets_map = {}
             for m in markets:
                 clean_title = ''.join(filter(str.isalnum, m['title'].lower()))
                 live_markets_map[clean_title] = m
 
-            # 2. Revisar cada posición una a una
-            #    Usamos list(...) para poder borrar elementos del diccionario mientras iteramos
             for symbol in list(trader.portfolio['positions'].keys()):
                 pos = trader.portfolio['positions'][symbol]
-                
-                # Normalizamos el nombre de la posición
                 pos_fingerprint = ''.join(filter(str.isalnum, pos['market'].lower()))
                 
-                # --- CASO A: ¿EL MERCADO HA DESAPARECIDO? (EXPIRADO) ---
-                # Buscamos coincidencias en el mapa
                 found_market = None
                 for live_fp, m_obj in live_markets_map.items():
                     if pos_fingerprint in live_fp or live_fp in pos_fingerprint:
@@ -948,31 +818,20 @@ def run():
                         break
                 
                 if not found_market:
-                    # El mercado ya no está en la API. Se acabó el evento.
-                    # Borramos la posición (asumimos valor 0 o lo que se recuperó al cierre)
                     print(f"🧹 LIMPIEZA: Mercado expirado. Eliminando posición {pos['bucket']}.")
                     del trader.portfolio['positions'][symbol]
-                    continue # Pasamos a la siguiente
+                    continue 
 
-                # --- CASO B: EL MERCADO VIVE, ¿PERO MI BUCKET ESTÁ MUERTO? ---
                 try:
                     bucket_str = pos['bucket']
-                    # Solo aplicamos lógica a buckets cerrados (no a los "+" infinitos)
                     if "+" not in bucket_str:
                         max_val = int(bucket_str.split('-')[1])
                         current_count = found_market['count']
-                        
-                        # SI YA NOS HAN PASADO (Tweets > Max Bucket)
                         if current_count > max_val:
-                            # La posición existe, pero vale CERO.
                             pos['current_price'] = 0.0
                             pos['market_value'] = 0.0
-                            # (Opcional) Le inyectamos el precio 0 al clob_data para la visualización
                             clob_data[pos['bucket']] = 0.0 
-                except:
-                    pass # Si hay error de formato, no tocamos nada
-
-            # ==============================================================================
+                except: pass
 
             trader.print_summary(clob_data)
             time.sleep(8) 
