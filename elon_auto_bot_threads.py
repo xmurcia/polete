@@ -58,8 +58,102 @@ API_CONFIG = {
     'user': "elonmusk"
 }
 
+# ==============================================================================
+# 🛰️ MÓDULO MOONSHOT (SATÉLITE) - V33 (CON ETIQUETADO DNA)
+# ==============================================================================
+def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p_hours_left):
+    """
+    Estrategia secundaria que opera SOLO al final del ciclo.
+    Busca 'Cisnes Negros' al alza (buckets lejanos y baratos).
+    """
+    try:
+        # 1. Filtro de Seguridad Dinámico: Timing basado en duración del evento
+        # Determinamos duración total del evento
+        if p_count > 130 or p_hours_left > 72: 
+            total_duration = 168.0  # 7 días
+        elif p_hours_left < 40: 
+            total_duration = 48.0   # 2 días
+        else: 
+            total_duration = 72.0   # 3 días
+        
+        # 1b. RESTRICCIÓN: Moonshots solo en eventos largos (≥3 días)
+        # En eventos cortos hay menos buckets y menos tiempo para materializar
+        if total_duration < 72.0:
+            return  # Evento demasiado corto para moonshots
+        
+        # Moonshots solo en el primer 40% del evento (cuando queda 60%+)
+        min_hours_required = total_duration * 0.60
+        
+        if p_hours_left < min_hours_required or p_count < 35: 
+            return  # Demasiado tarde o muy temprano
+
+        # 2. Revisar Cartera ACTUAL (Buscamos Moonshots por ETIQUETA, no adivinanza)
+        current_positions = trader.portfolio.get('positions', [])
+        moonshots_count = 0
+        moonshot_buckets_ids = []
+        
+        base_proj = p_count + (p_avg_hist / 24.0 * p_hours_left)
+        
+        for p in current_positions.values():
+            # Verificamos si es de este evento y si tiene la etiqueta MOONSHOT
+            clean_market = ''.join(filter(str.isalnum, p['market'].lower()))
+            clean_poly = ''.join(filter(str.isalnum, m_poly['title'].lower()))
+            
+            if clean_poly in clean_market or clean_market in clean_poly:
+                # AQUÍ ESTÁ LA CLAVE: Solo contamos si es ESTRATEGIA MOONSHOT
+                if p.get('strategy_tag') == 'MOONSHOT':
+                    moonshots_count += 1
+                    moonshot_buckets_ids.append(p['bucket'])
+
+        # 3. Límite de Inventario (Máximo 2 Moonshots)
+        if moonshots_count >= 2: 
+            return # Cupo lleno
+
+        # 4. Definir Objetivo (Rage Mode: +120 tweets sobre la media)
+        rage_target = base_proj + 120.0 
+        
+        # 4b. Límite de Realismo: No apostar a distancias imposibles
+        max_reasonable_distance = p_avg_hist * 3.0  # Max 3x la media diaria
+        
+        # 5. Buscar Candidatos
+        candidates = []
+        
+        for b in clob_data.get('buckets', []): 
+            if b.get('buckets'): return 
+            
+            ask = b.get('ask', 0)
+            
+            # FILTROS ESTRICTOS
+            if not (0.05 <= ask <= 0.09): continue # Precio
+            if b['min'] < base_proj: continue      # Dirección Alza
+            if b['min'] - base_proj > max_reasonable_distance: continue  # Realismo
+            if b['bucket'] in moonshot_buckets_ids: continue # No repetir
+            
+            # Distancia
+            if b['max'] >= 99999: mid = b['min'] + 20
+            else: mid = (b['min'] + b['max']) / 2
+            
+            dist = abs(mid - rage_target)
+            
+            if dist < 40:
+                candidates.append({'bucket': b, 'dist': dist, 'ask': ask})
+        
+        # 6. EJECUCIÓN
+        if candidates:
+            candidates.sort(key=lambda x: x['dist'])
+            best = candidates[0]
+            
+            print(f"    🛰️ MOONSHOT OPORTUNIDAD: {best['bucket']['bucket']} @ ${best['ask']:.2f}")
+            
+            # ⚡ IMPORTANTE: Pasamos 'MOONSHOT' como tag explícito
+            trader.execute(m_poly['title'], best['bucket']['bucket'], "BUY", best['ask'], "Moonshot V33", strategy_tag="MOONSHOT")
+            time.sleep(1.0)
+
+    except Exception as e:
+        pass
+
 # ==========================================
-# 1. SCANNER DE PRECIOS (V10 INTACTO)
+# 1. SCANNER DE PRECIOS
 # ==========================================
 class ClobMarketScanner:
     def __init__(self):
@@ -149,7 +243,7 @@ class ClobMarketScanner:
             return []
 
 # ==========================================
-# 2. CEREBRO MATEMÁTICO (V10 INTACTO - CARGA CSV)
+# 2. CEREBRO MATEMÁTICO
 # ==========================================
 class HawkesBrain:
     def __init__(self):
@@ -157,7 +251,7 @@ class HawkesBrain:
         self.timestamps = [] 
         self.history_df = None
         self._ensure_directories()
-        self.load_and_train() # V10: Carga CSVs
+        self.load_and_train()
 
     def _ensure_directories(self):
         if not os.path.exists(DAILY_METRICS_THREE_WEEKS_DIR): os.makedirs(DAILY_METRICS_THREE_WEEKS_DIR)
@@ -258,7 +352,7 @@ class HawkesBrain:
         return sims
 
 # ==========================================
-# 3. SENSOR DE TWEETS (V10 INTACTO + OPTIMIZACION FECHA)
+# 3. SENSOR DE TWEETS
 # ==========================================
 class PolymarketSensor:
     def __init__(self):
@@ -302,7 +396,6 @@ class PolymarketSensor:
             res = []
             now = datetime.now(timezone.utc)
             
-            # --- PEQUEÑA OPTIMIZACIÓN (NO CAMBIA LÓGICA, SOLO VELOCIDAD) ---
             candidates = []
             for t in trackings:
                 start_str = t.get('startDate'); end_str = t.get('endDate')
@@ -324,7 +417,7 @@ class PolymarketSensor:
         except: return []
 
 # ==========================================
-# 4. PAPER TRADER (V10 INTACTO)
+# 4. PAPER TRADER (V33 - CON ETIQUETADO)
 # ==========================================
 class PaperTrader:
     def __init__(self, initial_cash=1000.0):
@@ -332,6 +425,8 @@ class PaperTrader:
         self.log_path = os.path.join(LOGS_DIR, TRADE_LOG)
         self.risk_pct_normal = 0.04
         self.risk_pct_lotto = 0.01
+        self.risk_pct_moonshot = 0.01  # Moonshots: máximo 1%
+        self.max_moonshot_bet = 10.0   # Hard limit: $10 por moonshot
         self.min_bet = 5.0
         self.portfolio = self._load()
         self._ensure_log_header()
@@ -368,34 +463,31 @@ class PaperTrader:
         row = f"{ts},{action},{market_clean},{bucket},{price:.3f},{shares:.1f},{reason_clean},{pnl:.2f},{self.portfolio['cash']:.2f}\n"
         with open(self.log_path, "a", encoding='utf-8') as f: f.write(row)
 
-    # Helper V11 para saber qué buckets tenemos (MANTENIDO PERO NO USADO EN EL CORE LOOP)
-    def get_owned_buckets_val(self, market_title):
-        vals = []
-        for k, v in self.portfolio['positions'].items():
-            if self._clean_market_name(v['market']) == self._clean_market_name(market_title):
-                try:
-                    if "+" in v['bucket']: mid = int(re.search(r'\d+', v['bucket']).group()) + 20
-                    else: 
-                        nums = [int(n) for n in re.findall(r'\d+', v['bucket'])]
-                        mid = sum(nums)/2
-                    vals.append(mid)
-                except: pass
-        return vals
-
-    def execute(self, market_title, bucket, signal, price, reason="Manual"):
+    # 🔧 FIX V33: ACEPTAMOS UN ARGUMENTO 'strategy_tag'
+    def execute(self, market_title, bucket, signal, price, reason="Manual", strategy_tag="STANDARD"):
         pos_id = f"{market_title}|{bucket}"
         
         # BUY
         if "BUY" in signal or "FISH" in signal:
             if pos_id not in self.portfolio["positions"]:
-                pct = self.risk_pct_lotto if "FISH" in signal else self.risk_pct_normal
-                bet_amount = max(self.portfolio["cash"] * pct, self.min_bet)
+                # Selección de porcentaje de riesgo basado en tipo de trade
+                if strategy_tag == "MOONSHOT":
+                    # Moonshots: solo 1% del portfolio o $10 (lo que sea menor)
+                    bet_amount = min(self.portfolio["cash"] * self.risk_pct_moonshot, self.max_moonshot_bet)
+                elif "FISH" in signal:
+                    pct = self.risk_pct_lotto
+                    bet_amount = max(self.portfolio["cash"] * pct, self.min_bet)
+                else:
+                    pct = self.risk_pct_normal
+                    bet_amount = max(self.portfolio["cash"] * pct, self.min_bet)
                 if self.portfolio["cash"] >= bet_amount:
                     shares = bet_amount / price
                     self.portfolio["cash"] -= bet_amount
+                    # 💾 GUARDAMOS LA ETIQUETA EN EL PORTFOLIO
                     self.portfolio["positions"][pos_id] = {
                         "shares": shares, "entry_price": price, "market": market_title,
-                        "bucket": bucket, "timestamp": time.time(), "invested": bet_amount
+                        "bucket": bucket, "timestamp": time.time(), "invested": bet_amount,
+                        "strategy_tag": strategy_tag # <--- ETIQUETA DNA
                     }
                     self._save()
                     self._log_trade(signal, market_title, bucket, price, shares, reason)
@@ -434,7 +526,7 @@ class PaperTrader:
         print(f"   💵 Cash: ${cash:.2f} | 📈 Equity: ${cash+invested:.2f}")
 
 # ==========================================
-# 5. SENSOR DE PÁNICO (V10 INTACTO)
+# 5. SENSOR DE PÁNICO
 # ==========================================
 class MarketPanicSensor:
     def __init__(self, sensitivity=1.5):
@@ -459,7 +551,7 @@ class MarketPanicSensor:
 # 6. DIRECTOR (V12.16 - ACCUMULATION RESTORED)
 # ==========================================
 def run():
-    print("\n🤖 ELON-BOT V12.16 (ACCUMULATION STRATEGY RESTORED)")
+    print("\n🤖 ELON-BOT V12.16 (ACCUMULATION STRATEGY RESTORED + MOONSHOT V33)")
     
     # Utiles V10
     def log_monitor(msg):
@@ -663,7 +755,6 @@ def run():
                     # ==============================================================
                     # 🩹 FIX CRÍTICO DE INVENTARIO (Anti-Amnesia)
                     # ==============================================================
-                    # Creamos lista manual para saber qué tenemos exactamente.
                     my_buckets_ids = []
                     
                     for pos in trader.portfolio['positions'].values():
@@ -718,6 +809,57 @@ def run():
                             if pos_data:
                                 entry = pos_data['entry_price']
                                 profit_pct = (bid - entry) / entry if entry > 0 else 0
+                                
+                                # ==========================================================
+                                # 🛡️ INMUNIDAD POR ETIQUETA (DNA TAGGING)
+                                # ==========================================================
+                                
+                                if pos_data.get('strategy_tag') == 'MOONSHOT':
+                                    # 💀 EXPIRACIÓN: Si bid va a $0, realizar pérdida
+                                    if bid <= 0.01:
+                                        action = "SMART_ROTATE"
+                                        reason = f"Moonshot Expired (Total Loss) Z{z_score:.1f}"
+                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                        if res: 
+                                            save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                        continue  # Ya vendimos, siguiente bucket
+                                    
+                                    # 🏆 VICTORIA LAP: Si llega a $0.99, vendemos
+                                    if bid >= 0.99:
+                                        action = "SMART_ROTATE"
+                                        reason = f"Moonshot Victory Lap (${bid:.2f}) Z{z_score:.1f}"
+                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                        if res: 
+                                            save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                        continue  # Ya vendimos, siguiente bucket
+                                    
+                                    # UPDATE: Trackear precio máximo visto
+                                    current_max = pos_data.get('max_price_seen', entry)
+                                    if bid > current_max:
+                                        pos_data['max_price_seen'] = bid
+                                        current_max = bid
+                                        trader._save()  # Importante: guardar el nuevo máximo
+                                    
+                                    # 🎯 TRAILING STOP ADAPTATIVO PARA MOONSHOTS
+                                    if current_max >= 0.50:
+                                        # Una vez que llegamos a $0.50+, activamos trailing stop
+                                        # Si baja $0.15 desde el peak, cerramos con ganancias
+                                        drawdown_from_peak = current_max - bid
+                                        
+                                        if drawdown_from_peak >= 0.15:
+                                            action = "SMART_ROTATE"
+                                            reason = f"Moonshot Trailing Stop (Peak ${current_max:.2f} → ${bid:.2f}, -{drawdown_from_peak:.2f}) Z{z_score:.1f}"
+                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                            if res: 
+                                                save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                            continue  # Ya vendimos, siguiente bucket
+                                    
+                                    # 🛡️ INMUNIDAD TOTAL: Si no cumple ninguna condición de venta, HOLD
+                                    continue
+                                
+                                # ==========================================================
+                                # TRADES NORMALES (No-Moonshot)
+                                # ==========================================================
                                 
                                 should_sell = False
                                 sell_reason = "" 
@@ -784,10 +926,6 @@ def run():
                                 # ==========================================================
                                 # 🟢 ESTRATEGIA DE ACUMULACIÓN (+41% ROI RESTORED)
                                 # ==========================================================
-                                # Hemos eliminado el bloqueo de vecinos.
-                                # Si el bucket tiene valor (Z-Score + Edge), SE COMPRA.
-                                # Esto permite construir "Clusters" (ej: 300, 320, 340) naturales.
-                                
                                 if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
                                     edge = fair - ask
                                     if edge > 0.05:
@@ -832,6 +970,15 @@ def run():
                             pos['market_value'] = 0.0
                             clob_data[pos['bucket']] = 0.0 
                 except: pass
+
+            # ==================================================================
+            # 🌑 LLAMADA AL SATÉLITE MOONSHOT (AL FINAL DEL CICLO)
+            # ==================================================================
+            try:
+                ejecutar_moonshot_satelite(trader, m_poly, m_clob, p_count, p_avg_hist, p_hours_left)
+            except: pass
+            
+            # ==================================================================
 
             trader.print_summary(clob_data)
             time.sleep(8) 
