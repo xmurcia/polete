@@ -113,7 +113,8 @@ def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p
         rage_target = base_proj + 120.0 
         
         # 4b. Límite de Realismo: No apostar a distancias imposibles
-        max_reasonable_distance = p_avg_hist * 3.0  # Max 3x la media diaria
+        # CAMBIO #4: Filtro más estricto (2x vs 3x)
+        max_reasonable_distance = p_avg_hist * 2.0  # Max 2x la media diaria
         
         # 5. Buscar Candidatos
         candidates = []
@@ -122,9 +123,10 @@ def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p
             if b.get('buckets'): return 
             
             ask = b.get('ask', 0)
-            
+
             # FILTROS ESTRICTOS
-            if not (0.05 <= ask <= 0.09): continue # Precio V33 (10x-18x Payoff)
+            # CAMBIO #4: Precio ampliado para más oportunidades (90x-200x payoff)
+            if not (0.005 <= ask <= 0.011): continue # Precio V34 (90x-200x Payoff)
             if b['min'] < base_proj: continue      # Dirección Alza
             if b['min'] - base_proj > max_reasonable_distance: continue  # Realismo
             if b['bucket'] in moonshot_buckets_ids: continue # No repetir
@@ -772,8 +774,8 @@ def run():
                     for b in m_clob['buckets']:
                         if b['max'] < m_poly['count']: continue 
 
-                        # 0. WARM-UP
-                        min_req = 35 if m_poly['hours'] > 72.0 else 12
+                        # 0. WARM-UP (CAMBIO #17: Warmup reducido para capturar oportunidades tempranas)
+                        min_req = 20 if m_poly['hours'] > 72.0 else 8
                         IS_WARMUP = m_poly['count'] < min_req
 
                         # ❄️ COOLDOWN CHECK
@@ -841,10 +843,19 @@ def run():
                                         action = "SMART_ROTATE"
                                         reason = f"Moonshot Victory Lap (${bid:.2f}) Z{z_score:.1f}"
                                         res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
-                                        if res: 
+                                        if res:
                                             save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
                                         continue  # Ya vendimos, siguiente bucket
-                                    
+
+                                    # CAMBIO #4: Exit Parcial Temprano (lock 4x-6x profits)
+                                    if 0.20 <= bid <= 0.30 and profit_pct >= 3.0:
+                                        action = "SMART_ROTATE"
+                                        reason = f"Moonshot Partial Exit (Lock {profit_pct*100:.0f}%, ${bid:.2f})"
+                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                        if res:
+                                            save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                        continue  # Ya vendimos, siguiente bucket
+
                                     # UPDATE: Trackear precio máximo visto
                                     current_max = pos_data.get('max_price_seen', entry)
                                     if bid > current_max:
@@ -880,11 +891,14 @@ def run():
                                 
                                 bucket_headroom = b['max'] - m_poly['count']
                                 hours_left = m_poly['hours']
-                                
-                                if hours_left > 24.0: safety_threshold = 20
-                                elif hours_left > 12.0: safety_threshold = 15
-                                elif hours_left > 6.0: safety_threshold = 12
-                                else: safety_threshold = 10 
+                                # CAMBIO #5: Proximity Danger V2 (safety dinámico + volatilidad)
+                                if hours_left > 24.0: base_threshold = 15
+                                elif hours_left > 12.0: base_threshold = 12
+                                elif hours_left > 6.0: base_threshold = 10
+                                else: base_threshold = 8
+
+                                volatility_buffer = int(decayed_std * 1.5)
+                                safety_threshold = base_threshold + volatility_buffer
 
                                 # A) PELIGRO DE PROXIMIDAD
                                 if bucket_headroom < safety_threshold and bucket_headroom >= 0:
@@ -922,13 +936,17 @@ def run():
                             
                             bucket_headroom = b['max'] - m_poly['count']
                             hours_left = m_poly['hours']
-                            
-                            if hours_left > 24.0: buy_safety = 20
-                            elif hours_left > 12.0: buy_safety = 15
-                            elif hours_left > 6.0: buy_safety = 12
-                            elif hours_left > 1.0: buy_safety = 10
-                            else: buy_safety = 2
-                            
+
+                            # CAMBIO #5: Proximity Danger V2 (safety dinámico + volatilidad)
+                            if hours_left > 24.0: base_threshold = 15
+                            elif hours_left > 12.0: base_threshold = 12
+                            elif hours_left > 6.0: base_threshold = 10
+                            elif hours_left > 1.0: base_threshold = 8
+                            else: base_threshold = 2
+
+                            volatility_buffer = int(decayed_std * 1.5)
+                            buy_safety = base_threshold + volatility_buffer
+
                             if bucket_headroom < buy_safety: continue
                             
                             is_impossible = False
@@ -942,7 +960,9 @@ def run():
                                 # ==========================================================
                                 if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
                                     edge = fair - ask
-                                    if edge > 0.05:
+                                    # CAMBIO #10: Dynamic Min Edge (adapta a volatilidad)
+                                    dynamic_min_edge = 0.05 + (decayed_std * 0.01)
+                                    if edge > dynamic_min_edge:
                                         action = "BUY"; reason = f"Val+{edge:.2f}"
                                         res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
                                         if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
