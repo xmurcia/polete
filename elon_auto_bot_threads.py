@@ -59,9 +59,9 @@ API_CONFIG = {
 }
 
 # ==============================================================================
-# 🛰️ MÓDULO MOONSHOT (SATÉLITE) - V33 (CON ETIQUETADO DNA)
+# 🛰️ MÓDULO MOONSHOT (SATÉLITE) - V33 (CON ETIQUETADO DNA + COOLDOWNS)
 # ==============================================================================
-def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p_hours_left):
+def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p_hours_left, moonshot_cooldowns):
     """
     Estrategia secundaria que opera SOLO al final del ciclo.
     Busca 'Cisnes Negros' al alza (buckets lejanos y baratos).
@@ -124,10 +124,17 @@ def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p
             ask = b.get('ask', 0)
             
             # FILTROS ESTRICTOS
-            if not (0.05 <= ask <= 0.09): continue # Precio
+            if not (0.05 <= ask <= 0.09): continue # Precio V33 (10x-18x Payoff)
             if b['min'] < base_proj: continue      # Dirección Alza
             if b['min'] - base_proj > max_reasonable_distance: continue  # Realismo
             if b['bucket'] in moonshot_buckets_ids: continue # No repetir
+            
+            # 🛰️ COOLDOWN CHECK: No recomprar moonshots vendidos recientemente
+            if b['bucket'] in moonshot_cooldowns:
+                if datetime.now() < moonshot_cooldowns[b['bucket']]: 
+                    continue  # Aún en cooldown
+                else: 
+                    del moonshot_cooldowns[b['bucket']]  # Cooldown expirado
             
             # Distancia
             if b['max'] >= 99999: mid = b['min'] + 20
@@ -600,6 +607,7 @@ def run():
     # ❄️ INIT COOLDOWNS: Memoria de castigos
     # ==============================================================================
     stop_loss_cooldowns = {}
+    moonshot_cooldowns = {}  # 🛰️ Cooldowns para moonshots
 
     while True:
         try:
@@ -805,7 +813,9 @@ def run():
                         owned = b['bucket'] in my_buckets_ids
                         
                         if owned:
-                            pos_data = next((v for k,v in trader.portfolio['positions'].items() if v['bucket'] == b['bucket']), None)
+                            # 🔧 FIX CRÍTICO: Filtrar por MARKET y BUCKET para evitar confusión entre eventos
+                            pos_data = next((v for k,v in trader.portfolio['positions'].items() 
+                                           if v['bucket'] == b['bucket'] and titles_match_paranoid(m_poly['title'], v['market'])), None)
                             if pos_data:
                                 entry = pos_data['entry_price']
                                 profit_pct = (bid - entry) / entry if entry > 0 else 0
@@ -822,6 +832,8 @@ def run():
                                         res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
                                         if res: 
                                             save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                            # 🛰️ Activar cooldown de 24h después de pérdida total
+                                            moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=24)
                                         continue  # Ya vendimos, siguiente bucket
                                     
                                     # 🏆 VICTORIA LAP: Si llega a $0.99, vendemos
@@ -852,6 +864,8 @@ def run():
                                             res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
                                             if res: 
                                                 save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                                # 🛰️ Cooldown de 48h después de trailing stop (capturamos ganancia)
+                                                moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=48)
                                             continue  # Ya vendimos, siguiente bucket
                                     
                                     # 🛡️ INMUNIDAD TOTAL: Si no cumple ninguna condición de venta, HOLD
@@ -975,7 +989,7 @@ def run():
             # 🌑 LLAMADA AL SATÉLITE MOONSHOT (AL FINAL DEL CICLO)
             # ==================================================================
             try:
-                ejecutar_moonshot_satelite(trader, m_poly, m_clob, p_count, p_avg_hist, p_hours_left)
+                ejecutar_moonshot_satelite(trader, m_poly, m_clob, p_count, p_avg_hist, p_hours_left, moonshot_cooldowns)
             except: pass
             
             # ==================================================================
