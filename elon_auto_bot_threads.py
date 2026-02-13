@@ -479,16 +479,36 @@ class PaperTrader:
         # BUY
         if "BUY" in signal or "FISH" in signal:
             if pos_id not in self.portfolio["positions"]:
-                # Selección de porcentaje de riesgo basado en tipo de trade
+                # 1. DEFINIR TAMAÑO BASE
                 if strategy_tag == "MOONSHOT":
-                    # Moonshots: solo 1% del portfolio o $10 (lo que sea menor)
-                    bet_amount = min(self.portfolio["cash"] * self.risk_pct_moonshot, self.max_moonshot_bet)
+                    base_pct = self.risk_pct_moonshot # 1%
                 elif "FISH" in signal:
-                    pct = self.risk_pct_lotto
-                    bet_amount = max(self.portfolio["cash"] * pct, self.min_bet)
+                    base_pct = self.risk_pct_lotto    # 1%
                 else:
-                    pct = self.risk_pct_normal
-                    bet_amount = max(self.portfolio["cash"] * pct, self.min_bet)
+                    base_pct = self.risk_pct_normal   # 4% (Tu estándar)
+
+                # 2. 🔥 APLICAR CRITERIO DE KELLY SIMPLIFICADO (SNIPER MODE)
+                multiplier = 1.0
+                # Solo aumentamos la apuesta si el modelo detecta "Valor" (Edge matemático)
+                if "Val+" in reason:
+                    try:
+                        # Extraemos el número del texto "Val+0.36" -> 0.36
+                        edge_val = float(reason.split("Val+")[1].split()[0])
+                        # ESCALERA DE CONVICCIÓN
+                        if edge_val >= 0.40:    # Si el mercado nos regala 40 centavos o más
+                            multiplier = 2.0    # Doble apuesta (8%)
+                        elif edge_val >= 0.20:  # Si nos regala 20 centavos
+                            multiplier = 1.5    # +50% apuesta (6%)
+                    except:
+                        pass
+
+                # 3. CÁLCULO FINAL CON CINTURÓN DE SEGURIDAD
+                final_pct = base_pct * multiplier
+                # 🛡️ HARD CAP: Nunca arriesgar más del 10% del portfolio en una sola bala
+                # Esto te protege de errores de código o cisnes negros.
+                final_pct = min(final_pct, 0.10)
+                bet_amount = max(self.portfolio["cash"] * final_pct, self.min_bet)
+
                 if self.portfolio["cash"] >= bet_amount:
                     shares = bet_amount / price
                     self.portfolio["cash"] -= bet_amount
@@ -908,7 +928,7 @@ def run():
                                     should_sell = True; sell_reason = f"Victory Lap (Price {bid:.2f} > 0.95)"
                                 
                                 elif hours_left > 24.0:
-                                    profit_threshold = 1.5 if hours_left > 48.0 else 2.4
+                                    profit_threshold = 1.8 if hours_left > 48.0 else 2.4
                                     
                                     if profit_pct > 1.5 and z_score > 0.9:
                                         should_sell = True; sell_reason = "Paranoid Treasure (Secured)"
