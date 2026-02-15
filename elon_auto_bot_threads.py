@@ -11,7 +11,10 @@ from scipy.optimize import minimize
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import dateutil.parser
 from collections import deque
-from scipy.stats import norm 
+from scipy.stats import norm
+from dotenv import load_dotenv
+
+load_dotenv('keys.env')
 
 # ==========================================
 # CONFIGURACIÓN (V10 ORIGINAL)
@@ -57,6 +60,19 @@ API_CONFIG = {
     'clob_url': "https://clob.polymarket.com/prices",
     'user': "elonmusk"
 }
+
+# ==============================================================================
+# 💰 MODO DE TRADING: "PAPER" (simulado) o "REAL" (dinero real en Polymarket)
+# ==============================================================================
+TRADING_MODE = os.getenv("TRADING_MODE", "PAPER").upper()  # PAPER | REAL
+CLOB_HOST = "https://clob.polymarket.com"
+CHAIN_ID = 137  # Polygon mainnet
+POLYMARKET_PK = os.getenv("POLYMARKET_PK", "")
+POLYMARKET_FUNDER = os.getenv("POLYMARKET_FUNDER", "")  # Solo para wallets email/browser
+SIGNATURE_TYPE = int(os.getenv("POLYMARKET_SIG_TYPE", "0"))  # 0=EOA, 1=Magic/email, 2=browser
+DATA_API_URL = "https://data-api.polymarket.com"
+MAX_ORDER_RETRIES = 3
+ORDER_CONFIRMATION_WAIT = 2.0  # Segundos para esperar confirmación
 
 # ==============================================================================
 # 🛰️ MÓDULO MOONSHOT (SATÉLITE) - V33 (CON ETIQUETADO DNA + COOLDOWNS)
@@ -154,8 +170,9 @@ def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p
             
             print(f"    🛰️ MOONSHOT OPORTUNIDAD: {best['bucket']['bucket']} @ ${best['ask']:.2f}")
             
-            # ⚡ IMPORTANTE: Pasamos 'MOONSHOT' como tag explícito
-            trader.execute(m_poly['title'], best['bucket']['bucket'], "BUY", best['ask'], "Moonshot V33", strategy_tag="MOONSHOT")
+            # ⚡ IMPORTANTE: Pasamos 'MOONSHOT' como tag explícito + token_id para real trading
+            trader.execute(m_poly['title'], best['bucket']['bucket'], "BUY", best['ask'], "Moonshot V33",
+                          strategy_tag="MOONSHOT", token_id=best['bucket'].get('token_id'))
             time.sleep(1.0)
 
     except Exception as e:
@@ -240,7 +257,8 @@ class ClobMarketScanner:
                     precios = price_map.get(b['token'], {})
                     clean_buckets.append({
                         'bucket': b['bucket'], 'min': b['min'], 'max': b['max'],
-                        'ask': precios.get('sell', 0.0), 'bid': precios.get('buy', 0.0)
+                        'ask': precios.get('sell', 0.0), 'bid': precios.get('buy', 0.0),
+                        'token_id': b['token']  # Needed for real trading via CLOB
                     })
                 final_data.append({'title': mkt['title'], 'buckets': clean_buckets})
 
@@ -472,8 +490,8 @@ class PaperTrader:
         row = f"{ts},{action},{market_clean},{bucket},{price:.3f},{shares:.1f},{reason_clean},{pnl:.2f},{self.portfolio['cash']:.2f}\n"
         with open(self.log_path, "a", encoding='utf-8') as f: f.write(row)
 
-    # 🔧 FIX V33: ACEPTAMOS UN ARGUMENTO 'strategy_tag'
-    def execute(self, market_title, bucket, signal, price, reason="Manual", strategy_tag="STANDARD"):
+    # 🔧 FIX V33: ACEPTAMOS UN ARGUMENTO 'strategy_tag' + token_id para compatibilidad con RealTrader
+    def execute(self, market_title, bucket, signal, price, reason="Manual", strategy_tag="STANDARD", token_id=None):
         pos_id = f"{market_title}|{bucket}"
         
         # BUY
@@ -555,6 +573,345 @@ class PaperTrader:
         print(f"   💵 Cash: ${cash:.2f} | 📈 Equity: ${cash+invested:.2f}")
 
 # ==========================================
+# 4b. REAL TRADER (POLYMARKET CLOB - DINERO REAL)
+# ==========================================
+class RealTrader:
+    """
+    Ejecuta trades reales en Polymarket via py-clob-client.
+    Misma interfaz que PaperTrader para intercambio transparente.
+    """
+    def __init__(self, initial_cash=None):
+        from py_clob_client.client import ClobClient
+        from py_clob_client.clob_types import OrderArgs, MarketOrderArgs, OrderType
+        from py_clob_client.order_builder.constants import BUY as CLOB_BUY, SELL as CLOB_SELL
+
+        # Guardamos refs a los módulos para uso posterior
+        self._OrderArgs = OrderArgs
+        self._MarketOrderArgs = MarketOrderArgs
+        self._OrderType = OrderType
+        self._CLOB_BUY = CLOB_BUY
+        self._CLOB_SELL = CLOB_SELL
+
+        # Ficheros locales para tracking (espejo del estado real)
+        self.file_path = os.path.join(LOGS_DIR, "portfolio_real.json")
+        self.log_path = os.path.join(LOGS_DIR, "trade_history_real.csv")
+
+        # Sizing (mismos parámetros que PaperTrader)
+        self.risk_pct_normal = 0.04
+        self.risk_pct_lotto = 0.01
+        self.risk_pct_moonshot = 0.01
+        self.max_moonshot_bet = 10.0
+        self.min_bet = 5.0
+
+        # Inicializar cliente CLOB con autenticación
+        if not POLYMARKET_PK:
+            raise ValueError("POLYMARKET_PK no configurada. Exporta tu private key en keys.env")
+
+        client_kwargs = {
+            "host": CLOB_HOST,
+            "key": POLYMARKET_PK,
+            "chain_id": CHAIN_ID,
+            "signature_type": SIGNATURE_TYPE,
+        }
+        if SIGNATURE_TYPE in (1, 2) and POLYMARKET_FUNDER:
+            client_kwargs["funder"] = POLYMARKET_FUNDER
+
+        self.client = ClobClient(**client_kwargs)
+        self.client.set_api_creds(self.client.create_or_derive_api_creds())
+        print("💰 RealTrader: Conectado a Polymarket CLOB (Polygon)")
+
+        # Verificar allowances (una sola vez)
+        self._check_allowances()
+
+        # Portfolio local (espejo)
+        self.portfolio = self._load()
+        self._ensure_log_header()
+        if not self.portfolio:
+            # Obtener balance real de USDC
+            real_balance = self._get_usdc_balance()
+            self.portfolio = {"cash": real_balance, "positions": {}, "history": []}
+            self._save()
+            print(f"💰 Balance USDC real: ${real_balance:.2f}")
+
+    def _check_allowances(self):
+        """Verifica y configura allowances para trading (una sola vez)."""
+        try:
+            self.client.set_allowances()
+            print("   ✅ Allowances configuradas")
+        except Exception as e:
+            print(f"   ⚠️ Allowances check: {e}")
+
+    def _get_usdc_balance(self):
+        """Obtiene el balance real de USDC disponible."""
+        try:
+            # Intentar via balance-allowance endpoint del CLOB
+            # Usamos un token_id genérico para consultar
+            resp = self.client.get_balance_allowance()
+            if resp and 'balance' in resp:
+                return float(resp['balance']) / 1e6  # USDC tiene 6 decimales
+        except Exception:
+            pass
+        # Fallback: usar Data API
+        try:
+            wallet = self.client.get_address()
+            r = requests.get(f"{DATA_API_URL}/holdings/value",
+                           params={"user": wallet}, timeout=5)
+            data = r.json()
+            return float(data.get('cashBalance', 0))
+        except Exception as e:
+            print(f"   ⚠️ No se pudo obtener balance: {e}")
+            return 0.0
+
+    def _refresh_cash(self):
+        """Actualiza el cash disponible consultando el balance real."""
+        balance = self._get_usdc_balance()
+        if balance > 0:
+            self.portfolio["cash"] = balance
+            self._save()
+
+    def _load(self):
+        if os.path.exists(self.file_path):
+            try:
+                with open(self.file_path, 'r') as f: return json.load(f)
+            except: return None
+        return None
+
+    def _save(self):
+        with open(self.file_path, 'w') as f: json.dump(self.portfolio, f, indent=2)
+
+    def _ensure_log_header(self):
+        if not os.path.exists(self.log_path):
+            with open(self.log_path, "w", encoding='utf-8') as f:
+                f.write("Timestamp,Action,Market,Bucket,Price,Shares,Reason,PnL,Cash_After,OrderID,Status\n")
+
+    def _clean_market_name(self, full_title):
+        month_map = {"january": "Jan", "february": "Feb", "march": "Mar", "april": "Apr",
+                     "may": "May", "june": "Jun", "july": "Jul", "august": "Aug",
+                     "september": "Sep", "october": "Oct", "november": "Nov", "december": "Dec"}
+        pattern = r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d+)'
+        matches = re.findall(pattern, full_title, re.IGNORECASE)
+        if len(matches) >= 2:
+            m1, d1 = matches[0]; m2, d2 = matches[1]
+            return f"{month_map.get(m1.lower(), m1[:3])} {d1} - {month_map.get(m2.lower(), m2[:3])} {d2}"
+        return "Evento Global"
+
+    def _log_trade(self, action, market, bucket, price, shares, reason, pnl=0.0, order_id="", status=""):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        market_clean = market.replace(",", "")
+        reason_clean = reason.replace(",", ".")
+        row = f"{ts},{action},{market_clean},{bucket},{price:.3f},{shares:.1f},{reason_clean},{pnl:.2f},{self.portfolio['cash']:.2f},{order_id},{status}\n"
+        with open(self.log_path, "a", encoding='utf-8') as f: f.write(row)
+
+    def _place_order_with_retry(self, token_id, price, size, side):
+        """
+        Coloca una orden en Polymarket con reintentos.
+        Devuelve (order_id, filled_size) o (None, 0) si falla.
+        """
+        OrderArgs = self._OrderArgs
+        OrderType = self._OrderType
+
+        for attempt in range(MAX_ORDER_RETRIES):
+            try:
+                order_args = OrderArgs(
+                    price=round(price, 2),
+                    size=round(size, 1),
+                    side=side,
+                    token_id=token_id
+                )
+
+                signed_order = self.client.create_order(order_args)
+                resp = self.client.post_order(signed_order, OrderType.GTC)
+
+                if resp and resp.get("success"):
+                    order_id = resp.get("orderID", "unknown")
+                    print(f"      📡 Orden enviada: {order_id}")
+
+                    # Esperar breve para confirmación
+                    time.sleep(ORDER_CONFIRMATION_WAIT)
+
+                    # Verificar estado
+                    try:
+                        order_status = self.client.get_order(order_id)
+                        filled = float(order_status.get("size_matched", 0))
+                        status = order_status.get("status", "LIVE")
+                        return order_id, filled, status
+                    except Exception:
+                        # Si no podemos verificar, asumimos la orden está viva
+                        return order_id, 0.0, "LIVE"
+
+                else:
+                    error_msg = resp.get("errorMsg", "unknown error") if resp else "no response"
+                    print(f"      ⚠️ Orden rechazada (intento {attempt+1}): {error_msg}")
+
+                    # Si es error de fondos insuficientes, no reintentar
+                    if resp and "insufficient" in str(resp).lower():
+                        return None, 0.0, "REJECTED"
+
+            except Exception as e:
+                print(f"      ⚠️ Error orden (intento {attempt+1}): {e}")
+                if "429" in str(e):  # Rate limit
+                    time.sleep(2 ** attempt)
+                elif attempt < MAX_ORDER_RETRIES - 1:
+                    time.sleep(1)
+
+        return None, 0.0, "FAILED"
+
+    def execute(self, market_title, bucket, signal, price, reason="Manual", strategy_tag="STANDARD", token_id=None):
+        """
+        Ejecuta un trade REAL en Polymarket.
+        Requiere token_id para colocar órdenes en el CLOB.
+        """
+        pos_id = f"{market_title}|{bucket}"
+
+        if not token_id:
+            print(f"      ❌ REAL TRADE ABORTADO: Sin token_id para {bucket}")
+            return None
+
+        # BUY
+        if "BUY" in signal or "FISH" in signal:
+            if pos_id not in self.portfolio["positions"]:
+                # 1. Refrescar balance real antes de operar
+                self._refresh_cash()
+
+                # 2. DEFINIR TAMAÑO BASE (misma lógica que PaperTrader)
+                if strategy_tag == "MOONSHOT":
+                    base_pct = self.risk_pct_moonshot
+                elif "FISH" in signal:
+                    base_pct = self.risk_pct_lotto
+                else:
+                    base_pct = self.risk_pct_normal
+
+                # 3. CRITERIO DE KELLY SIMPLIFICADO
+                multiplier = 1.0
+                if "Val+" in reason:
+                    try:
+                        edge_val = float(reason.split("Val+")[1].split()[0])
+                        if edge_val >= 0.40:
+                            multiplier = 2.0
+                        elif edge_val >= 0.20:
+                            multiplier = 1.5
+                    except:
+                        pass
+
+                # 4. CÁLCULO FINAL CON CINTURÓN DE SEGURIDAD
+                final_pct = min(base_pct * multiplier, 0.10)
+                bet_amount = max(self.portfolio["cash"] * final_pct, self.min_bet)
+
+                # Moonshot hard cap
+                if strategy_tag == "MOONSHOT":
+                    bet_amount = min(bet_amount, self.max_moonshot_bet)
+
+                if self.portfolio["cash"] < bet_amount:
+                    print(f"      ❌ Sin fondos: ${self.portfolio['cash']:.2f} < ${bet_amount:.2f}")
+                    return None
+
+                shares = bet_amount / price
+
+                # 5. COLOCAR ORDEN REAL
+                print(f"      📡 Enviando BUY: {shares:.1f} shares @ ${price:.3f} (${bet_amount:.2f})")
+                order_id, filled, status = self._place_order_with_retry(
+                    token_id, price, shares, self._CLOB_BUY
+                )
+
+                if order_id:
+                    # Actualizar portfolio local
+                    actual_shares = filled if filled > 0 else shares  # Si no sabemos cuánto se llenó, asumimos todo
+                    actual_cost = actual_shares * price
+                    self.portfolio["cash"] -= actual_cost
+                    self.portfolio["positions"][pos_id] = {
+                        "shares": actual_shares, "entry_price": price, "market": market_title,
+                        "bucket": bucket, "timestamp": time.time(), "invested": actual_cost,
+                        "strategy_tag": strategy_tag,
+                        "token_id": token_id,
+                        "order_id": order_id
+                    }
+                    self._save()
+                    self._log_trade(signal, market_title, bucket, price, actual_shares, reason,
+                                  order_id=order_id, status=status)
+                    return f"✅ REAL BUY: ${actual_cost:.2f} (Order: {order_id[:12]}...)"
+                else:
+                    self._log_trade(signal, market_title, bucket, price, 0, reason,
+                                  order_id="FAILED", status="REJECTED")
+                    return None
+
+        # SELL
+        elif "SELL" in signal or "DUMP" in signal or "ROTATE" in signal or "TAKE_PROFIT" in signal:
+            if pos_id in self.portfolio["positions"]:
+                pos = self.portfolio["positions"][pos_id]
+                sell_token_id = pos.get("token_id", token_id)
+                shares_to_sell = pos["shares"]
+
+                # COLOCAR ORDEN DE VENTA REAL
+                print(f"      📡 Enviando SELL: {shares_to_sell:.1f} shares @ ${price:.3f}")
+                order_id, filled, status = self._place_order_with_retry(
+                    sell_token_id, price, shares_to_sell, self._CLOB_SELL
+                )
+
+                if order_id:
+                    revenue = shares_to_sell * price
+                    profit = revenue - pos.get("invested", shares_to_sell * pos["entry_price"])
+                    del self.portfolio["positions"][pos_id]
+                    self.portfolio["cash"] += revenue
+                    self.portfolio["history"].append({"market": market_title, "profit": profit})
+                    self._save()
+                    self._log_trade(signal, market_title, bucket, price, shares_to_sell, reason,
+                                  pnl=profit, order_id=order_id, status=status)
+                    return f"💰 REAL SELL: P&L ${profit:.2f} (Order: {order_id[:12]}...)"
+                else:
+                    # Si la venta falla, no eliminamos la posición
+                    self._log_trade(signal, market_title, bucket, price, 0, reason,
+                                  order_id="FAILED", status="SELL_REJECTED")
+                    print(f"      ❌ VENTA FALLIDA para {bucket}. Posición mantenida.")
+                    return None
+
+        return None
+
+    def cancel_open_orders(self):
+        """Cancela todas las órdenes abiertas. Útil para shutdown limpio."""
+        try:
+            self.client.cancel_all()
+            print("   🧹 Todas las órdenes abiertas canceladas")
+        except Exception as e:
+            print(f"   ⚠️ Error cancelando órdenes: {e}")
+
+    def sync_positions_from_chain(self):
+        """Sincroniza posiciones reales desde la Data API de Polymarket."""
+        try:
+            wallet = self.client.get_address()
+            r = requests.get(f"{DATA_API_URL}/positions",
+                           params={"user": wallet, "sortBy": "CURRENT", "sortDir": "DESC"},
+                           timeout=10)
+            positions = r.json()
+            print(f"   🔄 Posiciones on-chain: {len(positions)} encontradas")
+            return positions
+        except Exception as e:
+            print(f"   ⚠️ Error sincronizando posiciones: {e}")
+            return []
+
+    def print_summary(self, current_prices_data):
+        """Imprime resumen del portfolio real."""
+        # Refrescar balance
+        self._refresh_cash()
+        cash = self.portfolio["cash"]; invested = 0.0
+        print(f"\n💰 --- PORTFOLIO REAL (Polymarket) ---")
+        print(f"   🔹 {'FECHAS EVENTO':<20} | {'BUCKET':<10} | {'PRECIO':<8} | {'ACTUAL':<8} | {'P&L ($)':<8}")
+        print("   " + "-"*85)
+        for pid, pos in self.portfolio["positions"].items():
+            curr_p = pos['entry_price']
+            lbl = self._clean_market_name(pos.get('market', ''))
+            for m in current_prices_data:
+                if self._clean_market_name(m['title']) == lbl:
+                    for b in m['buckets']:
+                        if str(b['bucket']) == str(pos['bucket']): curr_p = b.get('bid', 0)
+            val = pos['shares'] * curr_p
+            pnl = val - (pos['shares'] * pos['entry_price'])
+            invested += val
+            tag = f" [{pos.get('strategy_tag', '')}]" if pos.get('strategy_tag') != 'STANDARD' else ''
+            print(f"   🔹 {lbl:<20} | {pos['bucket']:<10} | ${pos['entry_price']:.3f}  | ${curr_p:.3f}  | {pnl:+6.2f}{tag}")
+        print("   " + "-"*85)
+        print(f"   💵 Cash: ${cash:.2f} | 📈 Equity: ${cash+invested:.2f}")
+
+# ==========================================
 # 5. SENSOR DE PÁNICO
 # ==========================================
 class MarketPanicSensor:
@@ -580,8 +937,14 @@ class MarketPanicSensor:
 # 6. DIRECTOR (V12.16 - ACCUMULATION RESTORED)
 # ==========================================
 def run():
-    print("\n🤖 ELON-BOT V12.16 (ACCUMULATION STRATEGY RESTORED + MOONSHOT V33)")
-    
+    mode_label = "REAL 💰" if TRADING_MODE == "REAL" else "PAPER 📝"
+    print(f"\n🤖 ELON-BOT V12.16 (ACCUMULATION + MOONSHOT V33) [{mode_label}]")
+
+    if TRADING_MODE == "REAL":
+        print("=" * 65)
+        print("⚠️  MODO REAL ACTIVADO - OPERANDO CON DINERO REAL EN POLYMARKET")
+        print("=" * 65)
+
     # Utiles V10
     def log_monitor(msg):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -611,8 +974,13 @@ def run():
     brain = HawkesBrain()
     sensor = PolymarketSensor()
     pricer = ClobMarketScanner()
-    trader = PaperTrader()
     panic_sensor = MarketPanicSensor()
+
+    # Selección de trader según modo
+    if TRADING_MODE == "REAL":
+        trader = RealTrader()
+    else:
+        trader = PaperTrader()
     
     last_counts = {}
     last_tape = 0
@@ -851,7 +1219,7 @@ def run():
                                     if bid <= 0.01:
                                         action = "SMART_ROTATE"
                                         reason = f"Moonshot Expired (Total Loss) Z{z_score:.1f}"
-                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason, token_id=b.get('token_id'))
                                         if res: 
                                             save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
                                             # 🛰️ Activar cooldown de 24h después de pérdida total
@@ -862,7 +1230,7 @@ def run():
                                     if bid >= 0.99:
                                         action = "SMART_ROTATE"
                                         reason = f"Moonshot Victory Lap (${bid:.2f}) Z{z_score:.1f}"
-                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason, token_id=b.get('token_id'))
                                         if res:
                                             save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
                                         continue  # Ya vendimos, siguiente bucket
@@ -871,7 +1239,7 @@ def run():
                                     if 0.20 <= bid <= 0.30 and profit_pct >= 3.0:
                                         action = "SMART_ROTATE"
                                         reason = f"Moonshot Partial Exit (Lock {profit_pct*100:.0f}%, ${bid:.2f})"
-                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason, token_id=b.get('token_id'))
                                         if res:
                                             save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
                                         continue  # Ya vendimos, siguiente bucket
@@ -892,7 +1260,7 @@ def run():
                                         if drawdown_from_peak >= 0.15:
                                             action = "SMART_ROTATE"
                                             reason = f"Moonshot Trailing Stop (Peak ${current_max:.2f} → ${bid:.2f}, -{drawdown_from_peak:.2f}) Z{z_score:.1f}"
-                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason, token_id=b.get('token_id'))
                                             if res: 
                                                 save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
                                                 # 🛰️ Cooldown de 48h después de trailing stop (capturamos ganancia)
@@ -948,7 +1316,7 @@ def run():
 
                                 if should_sell:
                                     action = "SMART_ROTATE"; reason = f"{sell_reason} Z{z_score:.1f}"
-                                    res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                    res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason, token_id=b.get('token_id'))
                                     if res: 
                                         save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
 
@@ -984,7 +1352,7 @@ def run():
                                     dynamic_min_edge = 0.05 + (decayed_std * 0.01)
                                     if edge > dynamic_min_edge:
                                         action = "BUY"; reason = f"Val+{edge:.2f}"
-                                        res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
+                                        res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason, token_id=b.get('token_id'))
                                         if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
 
                         color_act = f"🟢 {action}" if "BUY" in action else (f"🔴 {action}" if "ROTATE" in action or "PROFIT" in action else "-")
@@ -1037,8 +1405,12 @@ def run():
             trader.print_summary(clob_data)
             time.sleep(8) 
 
-        except KeyboardInterrupt: break
-        except Exception as e: 
+        except KeyboardInterrupt:
+            print("\n🛑 Shutdown solicitado...")
+            if TRADING_MODE == "REAL" and hasattr(trader, 'cancel_open_orders'):
+                trader.cancel_open_orders()
+            break
+        except Exception as e:
             print(f"Loop Error: {e}"); time.sleep(5)
 
 if __name__ == "__main__":
