@@ -34,7 +34,7 @@ if not os.path.exists(MARKET_TAPE_DIR): os.makedirs(MARKET_TAPE_DIR)
 # --- AJUSTES V11 (SOLO PARAMETROS) ---
 MAX_Z_SCORE_ENTRY = 0.85
 MIN_PRICE_ENTRY = 0.02
-ENABLE_CLUSTERING = True # (Dejado en True, pero la lógica ahora es permisiva)
+ENABLE_CLUSTERING = True 
 CLUSTER_RANGE = 40
 MARKET_WEIGHT = 0.70
 
@@ -67,8 +67,7 @@ def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p
     Busca 'Cisnes Negros' al alza (buckets lejanos y baratos).
     """
     try:
-        # 1. Filtro de Seguridad Dinámico: Timing basado en duración del evento
-        # Determinamos duración total del evento
+        # 1. Filtro de Seguridad Dinámico
         if p_count > 130 or p_hours_left > 72: 
             total_duration = 168.0  # 7 días
         elif p_hours_left < 40: 
@@ -76,18 +75,14 @@ def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p
         else: 
             total_duration = 72.0   # 3 días
         
-        # 1b. RESTRICCIÓN: Moonshots solo en eventos largos (≥3 días)
-        # En eventos cortos hay menos buckets y menos tiempo para materializar
         if total_duration < 72.0:
             return  # Evento demasiado corto para moonshots
         
-        # Moonshots solo en el primer 40% del evento (cuando queda 60%+)
         min_hours_required = total_duration * 0.60
-        
         if p_hours_left < min_hours_required or p_count < 35: 
-            return  # Demasiado tarde o muy temprano
+            return 
 
-        # 2. Revisar Cartera ACTUAL (Buscamos Moonshots por ETIQUETA, no adivinanza)
+        # 2. Revisar Cartera ACTUAL
         current_positions = trader.portfolio.get('positions', [])
         moonshots_count = 0
         moonshot_buckets_ids = []
@@ -95,71 +90,47 @@ def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p
         base_proj = p_count + (p_avg_hist / 24.0 * p_hours_left)
         
         for p in current_positions.values():
-            # Verificamos si es de este evento y si tiene la etiqueta MOONSHOT
             clean_market = ''.join(filter(str.isalnum, p['market'].lower()))
             clean_poly = ''.join(filter(str.isalnum, m_poly['title'].lower()))
-            
             if clean_poly in clean_market or clean_market in clean_poly:
-                # AQUÍ ESTÁ LA CLAVE: Solo contamos si es ESTRATEGIA MOONSHOT
                 if p.get('strategy_tag') == 'MOONSHOT':
                     moonshots_count += 1
                     moonshot_buckets_ids.append(p['bucket'])
 
-        # 3. Límite de Inventario (Máximo 2 Moonshots)
-        if moonshots_count >= 2: 
-            return # Cupo lleno
+        if moonshots_count >= 2: return 
 
-        # 4. Definir Objetivo (Rage Mode: +120 tweets sobre la media)
         rage_target = base_proj + 120.0 
+        max_reasonable_distance = p_avg_hist * 2.0  
         
-        # 4b. Límite de Realismo: No apostar a distancias imposibles
-        # CAMBIO #4: Filtro más estricto (2x vs 3x)
-        max_reasonable_distance = p_avg_hist * 2.0  # Max 2x la media diaria
-        
-        # 5. Buscar Candidatos
         candidates = []
-        
         for b in clob_data.get('buckets', []): 
             if b.get('buckets'): return 
-            
             ask = b.get('ask', 0)
 
-            # FILTROS ESTRICTOS
-            # CAMBIO #4: Precio ampliado para más oportunidades (90x-200x payoff)
-            if not (0.005 <= ask <= 0.011): continue # Precio V34 (90x-200x Payoff)
-            if b['min'] < base_proj: continue      # Dirección Alza
-            if b['min'] - base_proj > max_reasonable_distance: continue  # Realismo
-            if b['bucket'] in moonshot_buckets_ids: continue # No repetir
+            if not (0.005 <= ask <= 0.011): continue 
+            if b['min'] < base_proj: continue      
+            if b['min'] - base_proj > max_reasonable_distance: continue  
+            if b['bucket'] in moonshot_buckets_ids: continue 
             
-            # 🛰️ COOLDOWN CHECK: No recomprar moonshots vendidos recientemente
             if b['bucket'] in moonshot_cooldowns:
-                if datetime.now() < moonshot_cooldowns[b['bucket']]: 
-                    continue  # Aún en cooldown
-                else: 
-                    del moonshot_cooldowns[b['bucket']]  # Cooldown expirado
+                if datetime.now() < moonshot_cooldowns[b['bucket']]: continue
+                else: del moonshot_cooldowns[b['bucket']]
             
-            # Distancia
             if b['max'] >= 99999: mid = b['min'] + 20
             else: mid = (b['min'] + b['max']) / 2
             
             dist = abs(mid - rage_target)
-            
             if dist < 40:
                 candidates.append({'bucket': b, 'dist': dist, 'ask': ask})
         
-        # 6. EJECUCIÓN
         if candidates:
             candidates.sort(key=lambda x: x['dist'])
             best = candidates[0]
-            
             print(f"    🛰️ MOONSHOT OPORTUNIDAD: {best['bucket']['bucket']} @ ${best['ask']:.2f}")
-            
-            # ⚡ IMPORTANTE: Pasamos 'MOONSHOT' como tag explícito
             trader.execute(m_poly['title'], best['bucket']['bucket'], "BUY", best['ask'], "Moonshot V33", strategy_tag="MOONSHOT")
             time.sleep(1.0)
 
-    except Exception as e:
-        pass
+    except Exception as e: pass
 
 # ==========================================
 # 1. SCANNER DE PRECIOS
@@ -370,7 +341,6 @@ class PolymarketSensor:
 
     def _fetch_tracking_detail(self, t, now):
         try:
-            # 1. Petición V10
             response = self.s.get(f"{API_CONFIG['base_url']}/trackings/{t['id']}?includeStats=true", timeout=5).json()
             d = response.get('data', {})
             end_date_str = d.get('endDate') or t.get('endDate')
@@ -379,7 +349,6 @@ class PolymarketSensor:
             if end_date_str:
                 try:
                     original_dt = dateutil.parser.isoparse(end_date_str)
-                    # Martillazo Horario (Lo que te gustaba de la V10)
                     fixed_end_date = original_dt.replace(hour=17, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
                     hours = (fixed_end_date - now).total_seconds() / 3600.0
                 except: pass
@@ -426,7 +395,7 @@ class PolymarketSensor:
         except: return []
 
 # ==========================================
-# 4. PAPER TRADER (V33 - CON ETIQUETADO)
+# 4. PAPER TRADER (V33 - CON ETIQUETADO + AUTO-HEDGE)
 # ==========================================
 class PaperTrader:
     def __init__(self, initial_cash=1000.0):
@@ -434,8 +403,8 @@ class PaperTrader:
         self.log_path = os.path.join(LOGS_DIR, TRADE_LOG)
         self.risk_pct_normal = 0.04
         self.risk_pct_lotto = 0.01
-        self.risk_pct_moonshot = 0.01  # Moonshots: máximo 1%
-        self.max_moonshot_bet = 10.0   # Hard limit: $10 por moonshot
+        self.risk_pct_moonshot = 0.01 
+        self.max_moonshot_bet = 10.0   
         self.min_bet = 5.0
         self.portfolio = self._load()
         self._ensure_log_header()
@@ -472,51 +441,46 @@ class PaperTrader:
         row = f"{ts},{action},{market_clean},{bucket},{price:.3f},{shares:.1f},{reason_clean},{pnl:.2f},{self.portfolio['cash']:.2f}\n"
         with open(self.log_path, "a", encoding='utf-8') as f: f.write(row)
 
-    # 🔧 FIX V33: ACEPTAMOS UN ARGUMENTO 'strategy_tag'
     def execute(self, market_title, bucket, signal, price, reason="Manual", strategy_tag="STANDARD"):
         pos_id = f"{market_title}|{bucket}"
         
-        # BUY
-        if "BUY" in signal or "FISH" in signal:
+        # BUY (Incluye soporte para HEDGE)
+        if "BUY" in signal or "FISH" in signal or "HEDGE" in signal:
             if pos_id not in self.portfolio["positions"]:
                 # 1. DEFINIR TAMAÑO BASE
                 if strategy_tag == "MOONSHOT":
-                    base_pct = self.risk_pct_moonshot # 1%
+                    base_pct = self.risk_pct_moonshot 
                 elif "FISH" in signal:
-                    base_pct = self.risk_pct_lotto    # 1%
+                    base_pct = self.risk_pct_lotto    
+                elif "HEDGE" in signal:           # <--- NUEVO: TAMAÑO PARA COBERTURA
+                    base_pct = 0.025              # 2.5% del capital (Seguro barato)
                 else:
-                    base_pct = self.risk_pct_normal   # 4% (Tu estándar)
+                    base_pct = self.risk_pct_normal   
 
                 # 2. 🔥 APLICAR CRITERIO DE KELLY SIMPLIFICADO (SNIPER MODE)
                 multiplier = 1.0
-                # Solo aumentamos la apuesta si el modelo detecta "Valor" (Edge matemático)
-                if "Val+" in reason:
+                # Solo aumentamos la apuesta si el modelo detecta "Valor" y NO es una cobertura
+                if "Val+" in reason and "HEDGE" not in signal:
                     try:
-                        # Extraemos el número del texto "Val+0.36" -> 0.36
                         edge_val = float(reason.split("Val+")[1].split()[0])
-                        # ESCALERA DE CONVICCIÓN
-                        if edge_val >= 0.40:    # Si el mercado nos regala 40 centavos o más
-                            multiplier = 2.0    # Doble apuesta (8%)
-                        elif edge_val >= 0.20:  # Si nos regala 20 centavos
-                            multiplier = 1.5    # +50% apuesta (6%)
-                    except:
-                        pass
+                        if edge_val >= 0.40:    
+                            multiplier = 2.0    
+                        elif edge_val >= 0.20:  
+                            multiplier = 1.5    
+                    except: pass
 
                 # 3. CÁLCULO FINAL CON CINTURÓN DE SEGURIDAD
                 final_pct = base_pct * multiplier
-                # 🛡️ HARD CAP: Nunca arriesgar más del 10% del portfolio en una sola bala
-                # Esto te protege de errores de código o cisnes negros.
                 final_pct = min(final_pct, 0.10)
                 bet_amount = max(self.portfolio["cash"] * final_pct, self.min_bet)
 
                 if self.portfolio["cash"] >= bet_amount:
                     shares = bet_amount / price
                     self.portfolio["cash"] -= bet_amount
-                    # 💾 GUARDAMOS LA ETIQUETA EN EL PORTFOLIO
                     self.portfolio["positions"][pos_id] = {
                         "shares": shares, "entry_price": price, "market": market_title,
                         "bucket": bucket, "timestamp": time.time(), "invested": bet_amount,
-                        "strategy_tag": strategy_tag # <--- ETIQUETA DNA
+                        "strategy_tag": strategy_tag 
                     }
                     self._save()
                     self._log_trade(signal, market_title, bucket, price, shares, reason)
@@ -576,11 +540,110 @@ class MarketPanicSensor:
                         alerts.append({'type': 'DUMP', 'market_title': m['title'], 'bucket': b['bucket'], 'price': b['bid'], 'min': b.get('min',0)})
         return alerts
 
+# ==============================================================================
+# 🛡️ MÓDULO AUTO-HEDGE V2 (COBERTURA TOTAL: SUELO Y TECHO)
+# ==============================================================================
+def gestionar_cobertura_final(trader, m_poly, clob_buckets):
+    """
+    Analiza si estamos expuestos a riesgo de 'Undershooting' (quedarnos cortos)
+    O de 'Overshooting' (pasarnos) en las últimas 24 horas.
+    Crea un 'Straddle' defensivo automáticamente.
+    """
+    try:
+        # 1. Solo aplica en 'End-Game' (últimas 24h)
+        p_hours_left = m_poly.get('hours', 24.0)
+        current_count = m_poly.get('count', 0)
+        
+        if p_hours_left > 24.0 or p_hours_left < 0.5: return 
+
+        # 2. Analizar Posiciones PROPIAS
+        my_buckets = []
+        for pid, pos in trader.portfolio['positions'].items():
+            clean_market = ''.join(filter(str.isalnum, pos['market'].lower()))
+            clean_poly = ''.join(filter(str.isalnum, m_poly['title'].lower()))
+            
+            if clean_poly in clean_market or clean_market in clean_poly:
+                try:
+                    if "+" in pos['bucket']:
+                        min_v = int(pos['bucket'].replace("+",""))
+                        max_v = 99999
+                    else:
+                        parts = pos['bucket'].split("-")
+                        min_v = int(parts[0])
+                        max_v = int(parts[1])
+                    my_buckets.append({'bucket': pos['bucket'], 'min': min_v, 'max': max_v})
+                except: pass
+        
+        if not my_buckets: return 
+
+        # Ordenar para encontrar los límites de nuestra "Fortaleza"
+        my_buckets.sort(key=lambda x: x['min'])
+        lowest_owned = my_buckets[0]
+        highest_owned = my_buckets[-1]
+        
+        # ---------------------------------------------------------
+        # A) PROTECCIÓN CONTRA CAÍDA (FLOOR HEDGE)
+        # ---------------------------------------------------------
+        pessimistic_rate = 1.0 # 1 tweet/hora (muy lento)
+        projected_floor = current_count + (pessimistic_rate * p_hours_left)
+        
+        if projected_floor < lowest_owned['min']:
+            # Estamos desnudos por abajo. Buscar vecino inferior.
+            target_max = lowest_owned['min'] - 1
+            _ejecutar_hedge(trader, m_poly, clob_buckets, target_match_func=lambda b: b['max'] == target_max, 
+                           reason_tag=f"Gap Risk (Floor {projected_floor:.0f})")
+
+        # ---------------------------------------------------------
+        # B) PROTECCIÓN CONTRA RAGE MODE (CEILING HEDGE)
+        # ---------------------------------------------------------
+        # Asumimos que en pánico final puede hacer 3.5 tweets/hora
+        optimistic_rate = 3.5 
+        projected_ceiling = current_count + (optimistic_rate * p_hours_left)
+        
+        if highest_owned['max'] < 99999 and projected_ceiling > highest_owned['max']:
+            # Estamos desnudos por arriba. Buscar vecino superior.
+            target_min = highest_owned['max'] + 1
+            _ejecutar_hedge(trader, m_poly, clob_buckets, target_match_func=lambda b: b['min'] == target_min, 
+                           reason_tag=f"Rage Risk (Ceiling {projected_ceiling:.0f})")
+
+    except Exception as e:
+        print(f"Error Auto-Hedge: {e}")
+
+def _ejecutar_hedge(trader, m_poly, clob_buckets, target_match_func, reason_tag):
+    """Función auxiliar para ejecutar la orden de hedge si existe el bucket"""
+    candidate = None
+    for b in clob_buckets:
+        if target_match_func(b):
+            candidate = b
+            break
+    
+    if candidate:
+        # Verificar que NO lo tenemos ya (doble check)
+        is_owned = False
+        for pos in trader.portfolio['positions'].values():
+            if pos['bucket'] == candidate['bucket'] and m_poly['title'] in pos['market']:
+                is_owned = True; break
+        
+        if not is_owned:
+            ask_price = candidate.get('ask', 999)
+            # Filtro de precio: Si vale más de $0.30, ya no es un seguro, es una apuesta cara.
+            # No compramos seguros caros automáticamente.
+            if 0.005 <= ask_price <= 0.30:
+                print(f"    🛡️ AUTO-HEDGE ACTIVADO: Comprando {candidate['bucket']} @ ${ask_price:.2f} ({reason_tag})")
+                trader.execute(
+                    m_poly['title'], 
+                    candidate['bucket'], 
+                    "BUY_HEDGE", 
+                    ask_price, 
+                    f"Auto-Hedge: {reason_tag}", 
+                    strategy_tag="HEDGE"
+                )
+
 # ==========================================
 # 6. DIRECTOR (V12.16 - ACCUMULATION RESTORED)
 # ==========================================
 def run():
-    print("\n🤖 ELON-BOT V12.16 (ACCUMULATION STRATEGY RESTORED + MOONSHOT V33)")
+    print("\n🤖 ELON-BOT V12.16 (ACCUMULATION STRATEGY RESTORED + MOONSHOT V33 + AUTO-HEDGE)")
     
     # Utiles V10
     def log_monitor(msg):
@@ -629,7 +692,7 @@ def run():
     # ❄️ INIT COOLDOWNS: Memoria de castigos
     # ==============================================================================
     stop_loss_cooldowns = {}
-    moonshot_cooldowns = {}  # 🛰️ Cooldowns para moonshots
+    moonshot_cooldowns = {} 
 
     while True:
         try:
@@ -681,12 +744,10 @@ def run():
                     # 🧠 CEREBRO V22: UNIVERSAL SCALE (AGNOSTIC)
                     # ==============================================================
                     try:
-                        # --- 1. DATOS BASE ---
                         p_count = m_poly.get('count', 0)
                         p_hours_left = m_poly.get('hours', 24.0)
                         p_avg_hist = m_poly.get('daily_avg', 45.0)
 
-                        # Fix Duración
                         if p_count > 130 or p_hours_left > 72: total_duration = 168.0
                         elif p_hours_left < 40: total_duration = 48.0
                         else: total_duration = 72.0
@@ -694,7 +755,6 @@ def run():
                         hours_elapsed = max(1.0, total_duration - p_hours_left)
                         rate_actual_diario = (p_count / hours_elapsed) * 24.0
                         
-                        # --- 2. CÁLCULO DE FATIGA (GRAVEDAD) ---
                         if p_hours_left < 6.0:
                             fatigue_weight = 0.95; mode_tag = "🚀 SPRINT"
                         elif p_hours_left < 24.0:
@@ -702,47 +762,36 @@ def run():
                         else:
                             fatigue_weight = 0.35; mode_tag = "⚓ MARATHON"
 
-                        # --- 3. PROYECCIÓN PURA ---
                         projected_rate = (rate_actual_diario * fatigue_weight) + (p_avg_hist * (1 - fatigue_weight))
                         
-                        # Cap de seguridad para largo plazo
                         if p_hours_left > 24.0:
                             max_rate_allowed = p_avg_hist * 3.0 
                             projected_rate = min(projected_rate, max_rate_allowed)
 
                         mean_prediction = p_count + (projected_rate / 24.0 * p_hours_left)
-                        
-                        # --- 4. CONTROL DE REALIDAD (AUTO-SCALING) ---
                         final_mean = mean_prediction 
                         
                         try:
-                            # Obtenemos buckets con liquidez real
                             all_buckets = m_clob.get('buckets', [])
                             market_buckets = [b for b in all_buckets if b['bid'] > 0.05]
                             
                             if market_buckets and p_hours_left > 12.0:
-                                # A) APRENDIZAJE: ¿De qué tamaño son los escalones en este mercado?
                                 bucket_sizes = []
                                 for b in all_buckets:
                                     size = b['max'] - b['min']
                                     if size < 100000 and size > 0: 
                                         bucket_sizes.append(size)
-                                
-                                # Calculamos la mediana
                                 if bucket_sizes:
                                     bucket_sizes.sort()
                                     avg_step = bucket_sizes[len(bucket_sizes)//2]
-                                else:
-                                    avg_step = 10.0 
+                                else: avg_step = 10.0 
                                 
-                                # B) CÁLCULO DEL CONSENSO
                                 w_sum = 0; w_vol = 0
                                 for b in market_buckets:
                                     range_size = b['max'] - b['min']
                                     if range_size > (avg_step * 5.0): 
                                         mid_val = b['min'] + avg_step 
-                                    else:
-                                        mid_val = (b['min'] + b['max']) / 2
+                                    else: mid_val = (b['min'] + b['max']) / 2
                                     w_sum += mid_val * b['bid']
                                     w_vol += b['bid']
 
@@ -751,14 +800,11 @@ def run():
                                     if abs(final_mean - consensus) > (consensus * 0.15):
                                         final_mean = (final_mean * 0.6) + (consensus * 0.4)
                                         mode_tag += "+MKT"
-                                        
-                        except Exception as e_mkt: pass 
+                        except Exception: pass 
 
-                        # --- 5. SIGMA ADAPTATIVA ---
                         raw_sigma = (final_mean ** 0.5) * 1.5
                         time_factor = (p_hours_left / 168.0) ** 0.5
                         eff_std = max(raw_sigma * max(0.3, time_factor), 3.0)
-                        
                         brain_mode = f"🧠 {mode_tag}"
 
                     except Exception as e:
@@ -767,9 +813,6 @@ def run():
                         eff_std = 5.0
                         brain_mode = "⚠️ ERROR"
                         
-                    # ==============================================================
-                    # 📉 FIX 1: SIGMA SINTÉTICA
-                    # ==============================================================
                     raw_sigma = (final_mean ** 0.5) * 1.5 if final_mean > 0 else 5.0
                     time_factor = (m_poly['hours'] / 168.0) ** 0.5
                     time_factor = max(0.2, min(1.0, time_factor)) 
@@ -782,11 +825,7 @@ def run():
                     print("-" * 65)
                     print(f"{'BUCKET':<10} | {'BID':<6} | {'ASK':<6} | {'FAIR':<6} | {'Z-SCR':<6} | {'ACTION'}")
 
-                    # ==============================================================
-                    # 🩹 FIX CRÍTICO DE INVENTARIO (Anti-Amnesia)
-                    # ==============================================================
                     my_buckets_ids = []
-                    
                     for pos in trader.portfolio['positions'].values():
                         if titles_match_paranoid(m_poly['title'], pos['market']):
                             my_buckets_ids.append(pos['bucket'])
@@ -794,25 +833,17 @@ def run():
                     for b in m_clob['buckets']:
                         if b['max'] < m_poly['count']: continue 
 
-                        # 0. WARM-UP (CAMBIO #17: Warmup reducido para capturar oportunidades tempranas)
                         min_req = 20 if m_poly['hours'] > 72.0 else 8
                         IS_WARMUP = m_poly['count'] < min_req
 
-                        # ❄️ COOLDOWN CHECK
                         if b['bucket'] in stop_loss_cooldowns:
                             if datetime.now() < stop_loss_cooldowns[b['bucket']]: continue
                             else: del stop_loss_cooldowns[b['bucket']]
                         
                         bid, ask = b.get('bid',0), b.get('ask',0)
 
-                        # ==============================================================
-                        # 🛡️ ESCUDO ANTI-CERO (Protección de Pánico)
-                        # ==============================================================
                         if bid <= 0.001 and p_hours_left > 2.0: continue 
                         
-                        # ==============================================================
-                        # 📉 V13 SIGMA DECAY
-                        # ==============================================================
                         if b['max'] >= 99999: mid = b['min'] + 20
                         else: mid = (b['min'] + b['max']) / 2
                         
@@ -823,95 +854,62 @@ def run():
                         
                         z_score = abs(mid - final_mean) / decayed_std
                         p_min = norm.cdf(b['min'], final_mean, decayed_std)
-                        
                         if b['max'] >= 99999: fair = 1.0 - p_min
                         else: fair = norm.cdf(b['max']+1, final_mean, decayed_std) - p_min
                         
                         action = "-"
                         reason = ""
-                        clean_fn = lambda s: s.lower().replace("?", "").replace("  ", " ").strip()
-                        
-                        # USAMOS LA LISTA MANUAL PARA EVITAR DUPLICADOS EXACTOS
                         owned = b['bucket'] in my_buckets_ids
                         
                         if owned:
-                            # 🔧 FIX CRÍTICO: Filtrar por MARKET y BUCKET para evitar confusión entre eventos
                             pos_data = next((v for k,v in trader.portfolio['positions'].items() 
                                            if v['bucket'] == b['bucket'] and titles_match_paranoid(m_poly['title'], v['market'])), None)
                             if pos_data:
                                 entry = pos_data['entry_price']
                                 profit_pct = (bid - entry) / entry if entry > 0 else 0
                                 
-                                # ==========================================================
-                                # 🛡️ INMUNIDAD POR ETIQUETA (DNA TAGGING)
-                                # ==========================================================
-                                
                                 if pos_data.get('strategy_tag') == 'MOONSHOT':
-                                    # 💀 EXPIRACIÓN: Si bid va a $0, realizar pérdida
                                     if bid <= 0.01:
-                                        action = "SMART_ROTATE"
-                                        reason = f"Moonshot Expired (Total Loss) Z{z_score:.1f}"
+                                        action = "SMART_ROTATE"; reason = f"Moonshot Expired (Total Loss) Z{z_score:.1f}"
                                         res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
                                         if res: 
                                             save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
-                                            # 🛰️ Activar cooldown de 24h después de pérdida total
                                             moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=24)
-                                        continue  # Ya vendimos, siguiente bucket
+                                        continue
                                     
-                                    # 🏆 VICTORIA LAP: Si llega a $0.99, vendemos
                                     if bid >= 0.99:
-                                        action = "SMART_ROTATE"
-                                        reason = f"Moonshot Victory Lap (${bid:.2f}) Z{z_score:.1f}"
+                                        action = "SMART_ROTATE"; reason = f"Moonshot Victory Lap (${bid:.2f}) Z{z_score:.1f}"
                                         res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
-                                        if res:
-                                            save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
-                                        continue  # Ya vendimos, siguiente bucket
+                                        if res: save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                        continue
 
-                                    # CAMBIO #4: Exit Parcial Temprano (lock 4x-6x profits)
                                     if 0.20 <= bid <= 0.30 and profit_pct >= 3.0:
-                                        action = "SMART_ROTATE"
-                                        reason = f"Moonshot Partial Exit (Lock {profit_pct*100:.0f}%, ${bid:.2f})"
+                                        action = "SMART_ROTATE"; reason = f"Moonshot Partial Exit (Lock {profit_pct*100:.0f}%, ${bid:.2f})"
                                         res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
-                                        if res:
-                                            save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
-                                        continue  # Ya vendimos, siguiente bucket
+                                        if res: save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                        continue
 
-                                    # UPDATE: Trackear precio máximo visto
                                     current_max = pos_data.get('max_price_seen', entry)
                                     if bid > current_max:
                                         pos_data['max_price_seen'] = bid
                                         current_max = bid
-                                        trader._save()  # Importante: guardar el nuevo máximo
+                                        trader._save()
                                     
-                                    # 🎯 TRAILING STOP ADAPTATIVO PARA MOONSHOTS
                                     if current_max >= 0.50:
-                                        # Una vez que llegamos a $0.50+, activamos trailing stop
-                                        # Si baja $0.15 desde el peak, cerramos con ganancias
                                         drawdown_from_peak = current_max - bid
-                                        
                                         if drawdown_from_peak >= 0.15:
-                                            action = "SMART_ROTATE"
-                                            reason = f"Moonshot Trailing Stop (Peak ${current_max:.2f} → ${bid:.2f}, -{drawdown_from_peak:.2f}) Z{z_score:.1f}"
+                                            action = "SMART_ROTATE"; reason = f"Moonshot Trailing Stop (Peak ${current_max:.2f} -> ${bid:.2f}) Z{z_score:.1f}"
                                             res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
                                             if res: 
                                                 save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
-                                                # 🛰️ Cooldown de 48h después de trailing stop (capturamos ganancia)
                                                 moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=48)
-                                            continue  # Ya vendimos, siguiente bucket
-                                    
-                                    # 🛡️ INMUNIDAD TOTAL: Si no cumple ninguna condición de venta, HOLD
+                                            continue
                                     continue
                                 
-                                # ==========================================================
-                                # TRADES NORMALES (No-Moonshot)
-                                # ==========================================================
-                                
-                                should_sell = False
-                                sell_reason = "" 
-                                
+                                should_sell = False; sell_reason = "" 
                                 bucket_headroom = b['max'] - m_poly['count']
                                 hours_left = m_poly['hours']
-                                # CAMBIO #5: Proximity Danger V2 (safety dinámico + volatilidad)
+
                                 if hours_left > 24.0: base_threshold = 15
                                 elif hours_left > 12.0: base_threshold = 12
                                 elif hours_left > 6.0: base_threshold = 10
@@ -920,20 +918,15 @@ def run():
                                 volatility_buffer = int(decayed_std * 1.5)
                                 safety_threshold = base_threshold + volatility_buffer
 
-                                # A) PELIGRO DE PROXIMIDAD
                                 if bucket_headroom < safety_threshold and bucket_headroom >= 0:
                                     should_sell = True; sell_reason = f"Proximity Danger ({bucket_headroom} left)" 
-                                # B) VICTORY LAP
                                 elif hours_left <= 48.0 and bid > 0.95:
                                     should_sell = True; sell_reason = f"Victory Lap (Price {bid:.2f} > 0.95)"
                                 
                                 elif hours_left > 24.0:
                                     profit_threshold = 1.8 if hours_left > 48.0 else 2.4
-                                    
-                                    if profit_pct > 1.5 and z_score > 0.9:
-                                        should_sell = True; sell_reason = "Paranoid Treasure (Secured)"
-                                    elif profit_pct > 0.05 and z_score > profit_threshold:
-                                        should_sell = True; sell_reason = f"Protect Profit (Mid-Game Z{profit_threshold})"
+                                    if profit_pct > 1.5 and z_score > 0.9: should_sell = True; sell_reason = "Paranoid Treasure (Secured)"
+                                    elif profit_pct > 0.05 and z_score > profit_threshold: should_sell = True; sell_reason = f"Protect Profit (Mid-Game Z{profit_threshold})"
 
                                     avg_entry = bid / (1 + profit_pct) if (1 + profit_pct) != 0 else bid
                                     if avg_entry < 0.05: sl_limit = -0.75
@@ -941,23 +934,18 @@ def run():
                                     else: sl_limit = -0.40
                                     if hours_left < 48.0: sl_limit = -2.0
 
-                                    if profit_pct < sl_limit and z_score > 1.3:
-                                        should_sell = True; sell_reason = f"Stop Loss Adaptativo (Hit {profit_pct*100:.1f}%)"
-                                    elif z_score > 8.0 and profit_pct < 0.10:
-                                        should_sell = True; sell_reason = "Extreme Panic (Z>8)"
+                                    if profit_pct < sl_limit and z_score > 1.3: should_sell = True; sell_reason = f"Stop Loss Adaptativo (Hit {profit_pct*100:.1f}%)"
+                                    elif z_score > 8.0 and profit_pct < 0.10: should_sell = True; sell_reason = "Extreme Panic (Z>8)"
 
                                 if should_sell:
                                     action = "SMART_ROTATE"; reason = f"{sell_reason} Z{z_score:.1f}"
                                     res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
-                                    if res: 
-                                        save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                    if res: save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
 
                         elif not owned and not IS_WARMUP:
-                            
                             bucket_headroom = b['max'] - m_poly['count']
                             hours_left = m_poly['hours']
 
-                            # CAMBIO #5: Proximity Danger V2 (safety dinámico + volatilidad)
                             if hours_left > 24.0: base_threshold = 15
                             elif hours_left > 12.0: base_threshold = 12
                             elif hours_left > 6.0: base_threshold = 10
@@ -975,12 +963,8 @@ def run():
                                 if tweets_needed > (m_poly['hours'] * 15): is_impossible = True
 
                             if not is_impossible:
-                                # ==========================================================
-                                # 🟢 ESTRATEGIA DE ACUMULACIÓN (+41% ROI RESTORED)
-                                # ==========================================================
                                 if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
                                     edge = fair - ask
-                                    # CAMBIO #10: Dynamic Min Edge (adapta a volatilidad)
                                     dynamic_min_edge = 0.05 + (decayed_std * 0.01)
                                     if edge > dynamic_min_edge:
                                         action = "BUY"; reason = f"Val+{edge:.2f}"
@@ -1032,6 +1016,13 @@ def run():
                 ejecutar_moonshot_satelite(trader, m_poly, m_clob, p_count, p_avg_hist, p_hours_left, moonshot_cooldowns)
             except: pass
             
+            # ==================================================================
+            # 🛡️ LLAMADA AL AUTO-HEDGE (NUEVO)
+            # ==================================================================
+            try:
+                if m_clob and 'buckets' in m_clob:
+                    gestionar_cobertura_final(trader, m_poly, m_clob['buckets'])
+            except Exception as e: pass
             # ==================================================================
 
             trader.print_summary(clob_data)
