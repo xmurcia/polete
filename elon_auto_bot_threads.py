@@ -951,9 +951,14 @@ def run():
                                     elif profit_pct > 0.05 and z_score > profit_threshold: should_sell = True; sell_reason = f"Protect Profit (Mid-Game Z{profit_threshold})"
 
                                     avg_entry = bid / (1 + profit_pct) if (1 + profit_pct) != 0 else bid
-                                    if avg_entry < 0.05: sl_limit = -0.75
-                                    elif avg_entry < 0.10: sl_limit = -0.60
-                                    else: sl_limit = -0.40
+                                    
+                                    # --- MODIFICACIÓN MOONSHOT INMORTAL ---
+                                    # Si entramos barato (< $0.12), NUNCA vendemos por pérdidas (Spread Filter).
+                                    if avg_entry < 0.12: 
+                                        sl_limit = -2.0 # -200% significa "Manos de Diamante"
+                                    else: 
+                                        sl_limit = -0.40 # -40% para trades normales
+                                    # --------------------------------------
                                     if hours_left < 48.0: sl_limit = -2.0
 
                                     if profit_pct < sl_limit and z_score > 1.3: should_sell = True; sell_reason = f"Stop Loss Adaptativo (Hit {profit_pct*100:.1f}%)"
