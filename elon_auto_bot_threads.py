@@ -918,9 +918,31 @@ def run():
                                 volatility_buffer = int(decayed_std * 1.5)
                                 safety_threshold = base_threshold + volatility_buffer
 
+                                # --- INICIO MODIFICACIÓN SMART PROXIMITY ---
+                                # 1. Calcular si estamos cubiertos arriba
+                                is_covered_above = False
+                                next_neighbor_min = b['max'] + 1
+                                for owned_b in my_buckets_ids:
+                                    try:
+                                        if "+" in owned_b: o_min = int(owned_b.replace("+",""))
+                                        else: o_min = int(owned_b.split("-")[0])
+                                        
+                                        if o_min == next_neighbor_min:
+                                            is_covered_above = True
+                                            break
+                                    except: pass
+
+                                # 2. Evaluar Proximity Danger
                                 if bucket_headroom < safety_threshold and bucket_headroom >= 0:
-                                    should_sell = True; sell_reason = f"Proximity Danger ({bucket_headroom} left)" 
-                                elif hours_left <= 48.0 and bid > 0.95:
+                                    if is_covered_above:
+                                        # Si estamos cubiertos, ignoramos el peligro de proximidad
+                                        pass 
+                                    else:
+                                        # Si NO estamos cubiertos, vendemos por pánico
+                                        should_sell = True; sell_reason = f"Proximity Danger ({bucket_headroom} left)" 
+                                # --- FIN MODIFICACIÓN ---
+                                
+                                if hours_left <= 48.0 and bid > 0.95:
                                     should_sell = True; sell_reason = f"Victory Lap (Price {bid:.2f} > 0.95)"
                                 
                                 elif hours_left > 24.0:
