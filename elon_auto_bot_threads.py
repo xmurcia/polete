@@ -11,7 +11,13 @@ from scipy.optimize import minimize
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import dateutil.parser
 from collections import deque
-from scipy.stats import norm 
+from scipy.stats import norm
+try:
+    import psycopg2
+    import psycopg2.extras
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
 
 # ==========================================
 # CONFIGURACIÓN (V10 ORIGINAL)
@@ -57,6 +63,156 @@ API_CONFIG = {
     'clob_url': "https://clob.polymarket.com/prices",
     'user': "elonmusk"
 }
+
+# ==========================================
+# POSTGRESQL STORAGE (DUAL WRITE)
+# ==========================================
+class PostgresStorage:
+    def __init__(self):
+        self._conn = None
+        if PSYCOPG2_AVAILABLE:
+            self._connect()
+            if self._conn:
+                self._ensure_tables()
+
+    def _connect(self):
+        try:
+            self._conn = psycopg2.connect(
+                host=os.environ.get('PG_HOST', 'localhost'),
+                port=int(os.environ.get('PG_PORT', 5432)),
+                dbname=os.environ.get('PG_DB', 'polete'),
+                user=os.environ.get('PG_USER', 'postgres'),
+                password=os.environ.get('PG_PASSWORD', ''),
+                connect_timeout=5
+            )
+            self._conn.autocommit = True
+            print("✅ PostgreSQL conectado")
+        except Exception as e:
+            print(f"⚠️  PostgreSQL no disponible: {e}")
+            self._conn = None
+
+    def _ensure_tables(self):
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS portfolio (
+                        id SERIAL PRIMARY KEY,
+                        timestamp TIMESTAMPTZ DEFAULT NOW(),
+                        data JSONB NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS trade_log (
+                        id SERIAL PRIMARY KEY,
+                        timestamp TIMESTAMPTZ,
+                        action VARCHAR(50),
+                        market TEXT,
+                        bucket VARCHAR(50),
+                        price NUMERIC(10,4),
+                        shares NUMERIC(10,2),
+                        reason TEXT,
+                        pnl NUMERIC(10,2),
+                        cash_after NUMERIC(10,2)
+                    );
+                    CREATE TABLE IF NOT EXISTS monitor_log (
+                        id SERIAL PRIMARY KEY,
+                        timestamp TIMESTAMPTZ,
+                        message TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS market_tape (
+                        id SERIAL PRIMARY KEY,
+                        timestamp TIMESTAMPTZ DEFAULT NOW(),
+                        meta JSONB,
+                        order_book JSONB
+                    );
+                    CREATE TABLE IF NOT EXISTS trade_snapshot (
+                        id SERIAL PRIMARY KEY,
+                        timestamp TIMESTAMPTZ DEFAULT NOW(),
+                        action VARCHAR(50),
+                        market TEXT,
+                        bucket VARCHAR(50),
+                        price NUMERIC(10,4),
+                        reason TEXT,
+                        context JSONB
+                    );
+                    CREATE TABLE IF NOT EXISTS live_events (
+                        id SERIAL PRIMARY KEY,
+                        event_timestamp BIGINT NOT NULL,
+                        inserted_at TIMESTAMPTZ DEFAULT NOW()
+                    );
+                """)
+        except Exception as e:
+            print(f"⚠️  Error creando tablas PG: {e}")
+
+    def _is_connected(self):
+        try:
+            if self._conn and not self._conn.closed:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def save_portfolio(self, portfolio_data):
+        if not self._is_connected(): return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("INSERT INTO portfolio (data) VALUES (%s)", (json.dumps(portfolio_data),))
+        except Exception as e:
+            print(f"⚠️  PG save_portfolio: {e}")
+
+    def log_trade(self, timestamp, action, market, bucket, price, shares, reason, pnl, cash_after):
+        if not self._is_connected(): return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO trade_log (timestamp, action, market, bucket, price, shares, reason, pnl, cash_after)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (timestamp, action, market, bucket, price, shares, reason, pnl, cash_after))
+        except Exception as e:
+            print(f"⚠️  PG log_trade: {e}")
+
+    def log_monitor(self, timestamp, message):
+        if not self._is_connected(): return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("INSERT INTO monitor_log (timestamp, message) VALUES (%s, %s)", (timestamp, message))
+        except Exception as e:
+            print(f"⚠️  PG log_monitor: {e}")
+
+    def save_market_tape(self, meta, order_book):
+        if not self._is_connected(): return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("INSERT INTO market_tape (meta, order_book) VALUES (%s, %s)",
+                            (json.dumps(meta), json.dumps(order_book)))
+        except Exception as e:
+            print(f"⚠️  PG save_market_tape: {e}")
+
+    def save_trade_snapshot(self, action, market, bucket, price, reason, context):
+        if not self._is_connected(): return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO trade_snapshot (action, market, bucket, price, reason, context)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (action, market, bucket, price, reason, json.dumps(context)))
+        except Exception as e:
+            print(f"⚠️  PG save_trade_snapshot: {e}")
+
+    def save_live_events(self, events):
+        if not self._is_connected(): return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("DELETE FROM live_events")
+                if events:
+                    psycopg2.extras.execute_values(
+                        cur,
+                        "INSERT INTO live_events (event_timestamp) VALUES %s",
+                        [(e['timestamp'],) for e in events]
+                    )
+        except Exception as e:
+            print(f"⚠️  PG save_live_events: {e}")
+
+
+pg_storage = PostgresStorage()
 
 # ==============================================================================
 # 🛰️ MÓDULO MOONSHOT (SATÉLITE) - V33 (CON ETIQUETADO DNA + COOLDOWNS)
@@ -419,6 +575,7 @@ class PaperTrader:
 
     def _save(self):
         with open(self.file_path, 'w') as f: json.dump(self.portfolio, f, indent=2)
+        pg_storage.save_portfolio(self.portfolio)
 
     def _ensure_log_header(self):
         if not os.path.exists(self.log_path):
@@ -440,6 +597,7 @@ class PaperTrader:
         reason_clean = reason.replace(",", ".")
         row = f"{ts},{action},{market_clean},{bucket},{price:.3f},{shares:.1f},{reason_clean},{pnl:.2f},{self.portfolio['cash']:.2f}\n"
         with open(self.log_path, "a", encoding='utf-8') as f: f.write(row)
+        pg_storage.log_trade(ts, action, market_clean, bucket, price, shares, reason_clean, pnl, self.portfolio['cash'])
 
     def execute(self, market_title, bucket, signal, price, reason="Manual", strategy_tag="STANDARD"):
         pos_id = f"{market_title}|{bucket}"
@@ -649,17 +807,20 @@ def run():
     def log_monitor(msg):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(os.path.join(LOGS_DIR, MONITOR_LOG), "a") as f: f.write(f"[{ts}] {msg}\n")
+        pg_storage.log_monitor(ts, msg)
 
     def save_market_tape(clob_data, markets_meta):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         with open(os.path.join(MARKET_TAPE_DIR, f"tape_{ts}.json"), "w") as f:
             json.dump({"timestamp": time.time(), "meta": markets_meta, "order_book": clob_data}, f)
+        pg_storage.save_market_tape(markets_meta, clob_data)
 
     def save_trade_snapshot(action, m_title, bucket, price, reason, ctx):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         fname = f"snap_{action}_{ts}.json"
         with open(os.path.join(SNAPSHOTS_DIR, fname), "w") as f:
             json.dump({"action": action, "market": m_title, "bucket": bucket, "price": price, "reason": reason, "context": ctx}, f, indent=2)
+        pg_storage.save_trade_snapshot(action, m_title, bucket, price, reason, ctx)
 
     def titles_match_paranoid(t1, t2):
         t1 = t1.lower(); t2 = t2.lower()
@@ -711,6 +872,7 @@ def run():
                     print(f"\n🚨 TWEET DETECTADO! (+{diff})")
                     for _ in range(diff): global_events.append({'timestamp': ts_now})
                     with open(os.path.join(LOGS_DIR, LIVE_LOG), 'w') as f: json.dump(global_events, f)
+                    pg_storage.save_live_events(global_events)
                 last_counts[m['id']] = curr
             
             global_events = [e for e in global_events if (ts_now - e['timestamp']) < 86400000]

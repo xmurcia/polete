@@ -11,6 +11,7 @@ mdurl==0.1.2
 multidict==6.7.0
 numpy
 pandas
+psycopg2-binary
 propcache==0.4.1
 Pygments==2.19.2
 python-dateutil==2.9.0.post0
