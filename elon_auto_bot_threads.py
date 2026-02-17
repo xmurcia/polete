@@ -97,7 +97,7 @@ def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p
                     moonshots_count += 1
                     moonshot_buckets_ids.append(p['bucket'])
 
-        if moonshots_count >= 2: return 
+        if moonshots_count >= 1: return 
 
         rage_target = base_proj + 120.0 
         max_reasonable_distance = p_avg_hist * 2.0  
