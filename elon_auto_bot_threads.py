@@ -1021,9 +1021,14 @@ def run():
                         break
                 
                 if not found_market:
-                    print(f"🧹 LIMPIEZA: Mercado expirado. Eliminando posición {pos['bucket']}.")
-                    del trader.portfolio['positions'][symbol]
-                    continue 
+                    # --- PARCHE ANTIBORRADO ---
+                    # Solo borramos si estamos 100% seguros de que la API nos dio datos reales.
+                    if len(live_markets_map) > 0:
+                        print(f"🧹 LIMPIEZA: Mercado expirado. Eliminando posición {pos['bucket']}.")
+                        del trader.portfolio['positions'][symbol]
+                    else:
+                        print(f"⚠️ AVISO: API vacía. Retrasando limpieza de {pos['bucket']} por seguridad.")
+                    continue
 
                 try:
                     bucket_str = pos['bucket']
