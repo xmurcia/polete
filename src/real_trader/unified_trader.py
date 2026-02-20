@@ -322,17 +322,36 @@ class UnifiedTrader:
 
         # --- SELL/ROTATE Logic ---
         elif "SELL" in signal or "ROTATE" in signal or "DUMP" in signal:
-            # 1. Find position in position_tracker
+            # 1. Find position in position_tracker by matching metadata cache
             positions = self.position_tracker.get_positions()
             position = None
 
+            # Try to match using cached metadata (which has resolved bucket names)
             for pos in positions:
-                if bucket in pos.range_label and market_title in pos.event_slug:
-                    position = pos
-                    break
+                metadata = self._token_metadata.get(pos.token_id)
+                if metadata:
+                    # Match by resolved bucket and market title
+                    if metadata['bucket'] == bucket and market_title.lower() in metadata['market_title'].lower():
+                        position = pos
+                        break
+                else:
+                    # Fallback: resolve from API and check
+                    try:
+                        resolved = self._resolve_position_display_sync(pos.token_id, pos.event_slug)
+                        if resolved['bucket'] == bucket and market_title.lower() in resolved['market_title'].lower():
+                            position = pos
+                            # Cache for next time
+                            self._token_metadata[pos.token_id] = {
+                                'market_title': resolved['market_title'],
+                                'bucket': resolved['bucket']
+                            }
+                            break
+                    except:
+                        pass
 
             if not position:
-                print(f"[UnifiedTrader] ⚠️  No position found for {bucket}")
+                print(f"[UnifiedTrader] ⚠️  No position found for {bucket} in market {market_title}")
+                print(f"[UnifiedTrader] 📋 Available positions: {[(self._token_metadata.get(p.token_id, {}).get('bucket', 'unknown'), p.event_slug) for p in positions]}")
                 return None
 
             # 2. Create sell order (FOK = Fill or Kill, market order)
