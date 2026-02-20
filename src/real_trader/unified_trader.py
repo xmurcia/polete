@@ -355,6 +355,8 @@ class UnifiedTrader:
                 return None
 
             # 2. Create sell order (FOK = Fill or Kill, market order)
+            print(f"[UnifiedTrader] 🔍 Attempting to SELL {position.size:.4f} shares of {bucket} @ {price:.3f}¢")
+
             order_request = OrderRequest(
                 token_id=position.token_id,
                 price=price,
@@ -370,6 +372,8 @@ class UnifiedTrader:
             result = await self.order_mgr.place_order(order_request)
 
             if result.success:
+                print(f"[UnifiedTrader] ✅ SELL executed: {position.size:.4f} shares - Order {result.order_id}")
+
                 # Calculate P&L
                 revenue = position.size * price
                 cost = position.size * position.avg_entry_price

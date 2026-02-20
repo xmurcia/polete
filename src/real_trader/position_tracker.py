@@ -69,6 +69,7 @@ class PositionTracker:
                 # Filter: only positions with size > 1
                 if size < 1:
                     filtered_count += 1
+                    print(f"[PositionTracker] 🔍 Filtered small position: {api_pos.get('outcome', 'N/A')} - {size:.4f} shares @ {api_pos.get('avgPrice', 0)}¢")
                     continue
 
                 # Filter: only Elon Musk events
