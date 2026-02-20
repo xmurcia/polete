@@ -254,9 +254,9 @@ def run():
                         if titles_match_paranoid(m_poly['title'], pos['market']):
                             my_buckets_ids.append(pos['bucket'])
 
-                    # DEBUG: Print owned positions for Feb13-Feb20
-                    if "Feb" in m_poly['title'] and "13" in m_poly['title']:
-                        print(f"[DEBUG Positions] Market: {m_poly['title'][:50]}, Owned buckets: {my_buckets_ids}")
+                    # DEBUG: Print ALL markets being evaluated with owned buckets
+                    if my_buckets_ids:
+                        print(f"[DEBUG] Market: {m_poly['title']}, Owned: {my_buckets_ids}, Hours: {m_poly.get('hours', 'N/A')}")
 
                     for b in m_clob['buckets']:
                         if b['max'] < m_poly['count']: continue
@@ -370,10 +370,8 @@ def run():
                                         should_sell = True; sell_reason = f"Proximity Danger ({bucket_headroom} left)" 
                                 # --- FIN MODIFICACIÓN ---
 
-                                # DEBUG: Print Victory Lap evaluation
-                                if b['bucket'] == "300-319":
-                                    print(f"[DEBUG Victory Lap] bucket={b['bucket']}, hours_left={hours_left:.2f}, bid={bid:.3f}, VICTORY_LAP_TIME_HOURS={VICTORY_LAP_TIME_HOURS}, VICTORY_LAP_PRICE={VICTORY_LAP_PRICE}")
-                                    print(f"[DEBUG Victory Lap] Condition check: hours_left <= {VICTORY_LAP_TIME_HOURS} = {hours_left <= VICTORY_LAP_TIME_HOURS}, bid > {VICTORY_LAP_PRICE} = {bid > VICTORY_LAP_PRICE}")
+                                # DEBUG: Print Victory Lap evaluation for ALL owned positions
+                                print(f"[DEBUG VL] {b['bucket']}: hrs={hours_left:.2f}, bid={bid:.3f}, should_VL={(hours_left <= VICTORY_LAP_TIME_HOURS and bid > VICTORY_LAP_PRICE)}")
 
                                 if hours_left <= VICTORY_LAP_TIME_HOURS and bid > VICTORY_LAP_PRICE:
                                     should_sell = True; sell_reason = f"Victory Lap (Price {bid:.2f} > {VICTORY_LAP_PRICE})"
