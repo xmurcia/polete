@@ -579,14 +579,32 @@ class UnifiedTrader:
         portfolio_positions = {}
 
         for pos in positions:
-            pos_id = f"{pos.event_slug}|{pos.range_label}"
+            # Resolve actual bucket name from token_id (not "Yes"/"No" outcome)
+            metadata = self._token_metadata.get(pos.token_id)
+            if metadata:
+                # Use cached data
+                market_title = metadata['market_title']
+                bucket = metadata['bucket']
+            else:
+                # Fallback: resolve from API (for positions that existed before this session)
+                resolved = self._resolve_position_display_sync(pos.token_id, pos.event_slug)
+                market_title = resolved['market_title']
+                bucket = resolved['bucket']
+
+                # Cache it for next time
+                self._token_metadata[pos.token_id] = {
+                    'market_title': market_title,
+                    'bucket': bucket
+                }
+
+            pos_id = f"{pos.event_slug}|{bucket}"
             portfolio_positions[pos_id] = {
                 "shares": pos.size,
                 "entry_price": pos.avg_entry_price,
                 "current_price": pos.current_price,
                 "unrealized_pnl": pos.unrealized_pnl,
-                "market": pos.event_slug,
-                "bucket": pos.range_label,
+                "market": market_title,
+                "bucket": bucket,
                 "timestamp": pos.timestamp,
                 "invested": pos.size * pos.avg_entry_price,
                 "strategy_tag": "STANDARD"  # TODO: track this in Position model
