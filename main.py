@@ -382,6 +382,11 @@ def run():
                                 if hours_left <= VICTORY_LAP_TIME_HOURS and bid > VICTORY_LAP_PRICE:
                                     should_sell = True; sell_reason = f"Victory Lap (Price {bid:.2f} > {VICTORY_LAP_PRICE})"
 
+                                # CATASTROPHIC STOP LOSS: Final phase only (< 24h)
+                                # Triggers when loss is extreme AND mathematically impossible to recover
+                                elif hours_left <= TIME_REMAINING_HOURS_RUN and profit_pct < STOP_LOSS_CATASTROPHIC and z_score > STOP_LOSS_CATASTROPHIC_Z_MIN:
+                                    should_sell = True; sell_reason = f"Catastrophic Loss ({profit_pct*100:.0f}%, Z{z_score:.1f} impossible)"
+
                                 elif hours_left > TIME_REMAINING_HOURS_RUN:
                                     profit_threshold = PROFIT_PROTECT_Z_MID if hours_left > VICTORY_LAP_TIME_HOURS else PROFIT_PROTECT_Z_LONG
                                     if profit_pct > PARANOID_TREASURE_MIN_PCT and z_score > PARANOID_TREASURE_Z: should_sell = True; sell_reason = "Paranoid Treasure (Secured)"
