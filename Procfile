@@ -1,1 +1,1 @@
-worker: python elon_auto_bot_threads.py
+worker: python main.py --real-trading
