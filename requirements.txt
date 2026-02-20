@@ -1,3 +1,4 @@
+# Core dependencies
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
 aiosignal==1.4.0
@@ -23,3 +24,16 @@ tzdata==2025.3
 urllib3==2.6.3
 websockets==16.0
 yarl==1.22.0
+
+# Real trader dependencies
+py-clob-client>=0.34.0
+python-dotenv>=1.0.0
+web3>=6.0.0
+
+# Testing dependencies
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
+
+# Database dependencies
+psycopg2-binary>=2.9.0
