@@ -153,6 +153,12 @@ def run():
             # 3. Pre-cargar portfolio (CRITICAL for REAL mode exit logic)
             portfolio_cache = trader.get_portfolio() if hasattr(trader, 'get_portfolio') else trader.portfolio
 
+            # DEBUG: Print entire portfolio cache to diagnose matching issues
+            print(f"\n[DEBUG PORTFOLIO] Total positions: {len(portfolio_cache['positions'])}")
+            for pos_id, pos in portfolio_cache['positions'].items():
+                print(f"[DEBUG PORTFOLIO] {pos_id} → Market: '{pos['market']}', Bucket: '{pos['bucket']}', Shares: {pos.get('shares', 0)}")
+            print("")
+
             # 4. Precios y Analisis
             clob_data = pricer.get_market_prices()
             if clob_data:
