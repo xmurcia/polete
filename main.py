@@ -150,7 +150,10 @@ def run():
             ts_list = [e['timestamp'] for e in global_events]
             IS_WARMUP = len(ts_list) < 5
 
-            # 3. Precios y Analisis
+            # 3. Pre-cargar portfolio (CRITICAL for REAL mode exit logic)
+            portfolio_cache = trader.get_portfolio() if hasattr(trader, 'get_portfolio') else trader.portfolio
+
+            # 4. Precios y Analisis
             clob_data = pricer.get_market_prices()
             if clob_data:
                 # Tape
@@ -247,7 +250,7 @@ def run():
                     print(f"{'BUCKET':<10} | {'BID':<6} | {'ASK':<6} | {'FAIR':<6} | {'Z-SCR':<6} | {'ACTION'}")
 
                     my_buckets_ids = []
-                    for pos in trader.portfolio['positions'].values():
+                    for pos in portfolio_cache['positions'].values():
                         if titles_match_paranoid(m_poly['title'], pos['market']):
                             my_buckets_ids.append(pos['bucket'])
 
@@ -283,7 +286,7 @@ def run():
                         owned = b['bucket'] in my_buckets_ids
                         
                         if owned:
-                            pos_data = next((v for k,v in trader.portfolio['positions'].items() 
+                            pos_data = next((v for k,v in portfolio_cache['positions'].items()
                                            if v['bucket'] == b['bucket'] and titles_match_paranoid(m_poly['title'], v['market'])), None)
                             if pos_data:
                                 entry = pos_data['entry_price']
