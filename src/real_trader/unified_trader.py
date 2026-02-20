@@ -10,6 +10,13 @@ from typing import Optional, Dict, Any
 # Add parent directory to path for PaperTrader import (need to go up 2 levels: src/real_trader -> src -> root)
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
+# Import database for dual-write
+try:
+    import database as db
+    DB_AVAILABLE = db.is_db_available()
+except ImportError:
+    DB_AVAILABLE = False
+
 # Import Telegram notifier
 try:
     from src.notifications.telegram_notifier import TelegramNotifier
@@ -128,7 +135,11 @@ class UnifiedTrader:
         signal: str,
         price: float,
         reason: str = "Manual",
-        strategy_tag: str = "STANDARD"
+        strategy_tag: str = "STANDARD",
+        hours_left: Optional[float] = None,
+        tweet_count: Optional[int] = None,
+        market_consensus: Optional[float] = None,
+        entry_z_score: Optional[float] = None
     ) -> Optional[str]:
         """
         Execute a trade (paper or real).
@@ -150,10 +161,16 @@ class UnifiedTrader:
                 loop = asyncio.get_running_loop()
                 raise RuntimeError("Cannot call execute() from async context")
             except RuntimeError:
-                return asyncio.run(self._execute_real(market_title, bucket, signal, price, reason, strategy_tag))
+                return asyncio.run(self._execute_real(
+                    market_title, bucket, signal, price, reason, strategy_tag,
+                    hours_left, tweet_count, market_consensus, entry_z_score
+                ))
         else:
             # Paper mode - PaperTrader handles its own logging
-            return self._paper_trader.execute(market_title, bucket, signal, price, reason, strategy_tag)
+            return self._paper_trader.execute(
+                market_title, bucket, signal, price, reason, strategy_tag,
+                hours_left, tweet_count, market_consensus, entry_z_score
+            )
 
     async def _execute_real(
         self,
@@ -162,7 +179,11 @@ class UnifiedTrader:
         signal: str,
         price: float,
         reason: str,
-        strategy_tag: str
+        strategy_tag: str,
+        hours_left: Optional[float] = None,
+        tweet_count: Optional[int] = None,
+        market_consensus: Optional[float] = None,
+        entry_z_score: Optional[float] = None
     ) -> Optional[str]:
         """Execute real trade on blockchain"""
 
@@ -242,7 +263,7 @@ class UnifiedTrader:
                 # Get cash after trade
                 cash_after = await self.balance_mgr.get_available_balance()
 
-                # Log trade
+                # Log trade (with context for dual-write)
                 self._log_trade(
                     action="BUY",
                     market=market_title,
@@ -251,8 +272,28 @@ class UnifiedTrader:
                     shares=shares,
                     reason=reason,
                     pnl=0.0,
-                    cash_after=cash_after
+                    cash_after=cash_after,
+                    strategy=strategy_tag,
+                    hours_left=hours_left,
+                    tweet_count=tweet_count,
+                    market_consensus=market_consensus
                 )
+
+                # Write position to DB (shadow mode)
+                if DB_AVAILABLE:
+                    pos_data = {
+                        "shares": shares,
+                        "entry_price": price,
+                        "market": market_title,
+                        "bucket": bucket,
+                        "timestamp": result.created_at if hasattr(result, 'created_at') else None,
+                        "invested": bet_amount,
+                        "strategy_tag": strategy_tag,
+                        "token_id": token_id,
+                        "entry_z_score": entry_z_score
+                    }
+                    pos_id = f"{market_title}|{bucket}"
+                    db.shadow_write(db.upsert_position, pos_id, pos_data, mode="REAL")
 
                 # Send Telegram notification
                 if self.telegram:
@@ -321,7 +362,7 @@ class UnifiedTrader:
                 # Get cash after trade
                 cash_after = await self.balance_mgr.get_available_balance()
 
-                # Log trade
+                # Log trade (with context for dual-write)
                 self._log_trade(
                     action="SELL",
                     market=market_title,
@@ -330,8 +371,17 @@ class UnifiedTrader:
                     shares=position.size,
                     reason=reason,
                     pnl=profit,
-                    cash_after=cash_after
+                    cash_after=cash_after,
+                    strategy=strategy_tag,
+                    hours_left=hours_left,
+                    tweet_count=tweet_count,
+                    market_consensus=market_consensus
                 )
+
+                # Delete position from DB (shadow mode)
+                if DB_AVAILABLE:
+                    pos_id = f"{market_title}|{bucket}"
+                    db.shadow_write(db.delete_position, pos_id, mode="REAL")
 
                 # Send Telegram notification
                 if self.telegram:
@@ -728,8 +778,10 @@ class UnifiedTrader:
                 f.write("Timestamp,Action,Market,Bucket,Price,Shares,Reason,PnL,Cash_After,Mode\n")
 
     def _log_trade(self, action: str, market: str, bucket: str, price: float,
-                   shares: float, reason: str, pnl: float = 0.0, cash_after: float = 0.0):
-        """Log trade to CSV (same format as PaperTrader + Mode column)"""
+                   shares: float, reason: str, pnl: float = 0.0, cash_after: float = 0.0,
+                   strategy: str = "STANDARD", hours_left: Optional[float] = None,
+                   tweet_count: Optional[int] = None, market_consensus: Optional[float] = None):
+        """Log trade to CSV and DB (dual-write)"""
         from datetime import datetime
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -737,10 +789,30 @@ class UnifiedTrader:
         reason_clean = reason.replace(",", ".")
         mode = "REAL" if self.use_real else "PAPER"
 
+        # 1. Escribir a CSV (OBLIGATORIO - fuente de verdad)
         row = f"{ts},{action},{market_clean},{bucket},{price:.3f},{shares:.1f},{reason_clean},{pnl:.2f},{cash_after:.2f},{mode}\n"
 
         with open(self.trade_log_path, "a", encoding='utf-8') as f:
             f.write(row)
+
+        # 2. Escribir a DB en shadow mode (OPCIONAL - no bloquea si falla)
+        if DB_AVAILABLE:
+            db.shadow_write(
+                db.log_trade,
+                action=action,
+                market=market,
+                bucket=bucket,
+                price=price,
+                shares=shares,
+                reason=reason,
+                pnl=pnl,
+                cash_after=cash_after,
+                mode=mode,
+                strategy=strategy,
+                hours_left=hours_left,
+                tweet_count=tweet_count,
+                market_consensus=market_consensus
+            )
 
         print(f"[UnifiedTrader] 📝 Logged: {action} {bucket} @ ${price:.3f}")
 
