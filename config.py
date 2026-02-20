@@ -304,7 +304,7 @@ MOONSHOT_TRAILING_DRAWDOWN = 0.15        # Exit if drops $0.15 from peak
 # ==============================================================================
 
 # Only activate hedge in final hours
-HEDGE_MAX_TIME_HOURS = 24.0  # Last 24 hours
+HEDGE_MAX_TIME_HOURS = 12.0  # Last 12 hours (conservative, avoids premature hedges)
 HEDGE_MIN_TIME_HOURS = 0.5   # But not in final 30 minutes
 
 # Price filters for hedge positions (must be cheap insurance)
