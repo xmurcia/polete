@@ -3,8 +3,28 @@ __pycache__/
 venv/
 *.pyc
 .DS_Store
-.idea/  
+.idea/
 polete-volume
 polete-volume/market_tape/*
 polete-volume/snapshots/*
 polete-volume.tar.gz
+
+polete-volume-2
+polete-volume-2/market_tape/*
+polete-volume-2/snapshots/*
+polete-volume-2.tar.gz
+
+# Environment and credentials
+.env
+src/real_trader/.credentials.json
+
+.agents
+.claude
+.codex
+.opencode
+
+# Archived/legacy files
+_archived/
+backtest_logs
+implementation_plan
+sql

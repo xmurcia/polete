@@ -1,0 +1,27 @@
+# Logs and data
+logs/*.json
+logs/*.csv
+logs/snapshots/*
+logs/market_tape/*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
