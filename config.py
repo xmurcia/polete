@@ -104,7 +104,7 @@ MIN_PRICE_ENTRY = 0.02  # $0.02 minimum
 MIN_EDGE_BASE = 0.05  # 5% base edge required
 
 # Dynamic edge adjustment based on volatility
-EDGE_STD_MULTIPLIER = 0.01  # Add 1% per unit of std deviation
+EDGE_STD_MULTIPLIER = 0.005  # Add 0.5% per unit of std deviation (reduced from 0.01 to allow earlier entries in long events)
 
 # ==============================================================================
 # CLUSTERING (Position Concentration Strategy)
