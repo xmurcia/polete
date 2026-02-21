@@ -1,6 +1,12 @@
 """
 Notificaciones de Telegram para Bot de Trading Polymarket
-Envía notificaciones de trades, P&L y alertas
+Envía notificaciones de trades, P&L y alertas.
+
+Cambios v2:
+- notify_positions_summary ahora agrupa por evento y muestra precio en vivo,
+  valor de la apuesta en dólares, P&L $ y P&L % por cada ticket (bucket).
+- El flag RICH_NOTIFICATIONS (config.py) activa/desactiva el nuevo formato.
+- Los valores de precio se etiquetan con su fuente: [FUENTE: clob | calculado | caché].
 """
 
 import os
@@ -10,6 +16,12 @@ from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Importar flag de configuración (con fallback a True por si config no carga)
+try:
+    from config import RICH_NOTIFICATIONS
+except ImportError:
+    RICH_NOTIFICATIONS = True
 
 
 class TelegramNotifier:
@@ -202,8 +214,142 @@ class TelegramNotifier:
 """
         self.send_message(message.strip(), silent=True)
 
+    # ------------------------------------------------------------------
+    # PORTFOLIO SUMMARY — Dispatcher RICH / SIMPLE según RICH_NOTIFICATIONS
+    # ------------------------------------------------------------------
+
     def notify_positions_summary(self, positions: list, balance: float, mode: str):
-        """Enviar resumen completo de posiciones (cada 2 horas)"""
+        """
+        Enviar resumen completo de posiciones (cada 2 horas).
+        Redirige al formato enriquecido o al simple según RICH_NOTIFICATIONS.
+        """
+        if RICH_NOTIFICATIONS:
+            self._notify_positions_summary_rich(positions, balance, mode)
+        else:
+            self._notify_positions_summary_simple(positions, balance, mode)
+
+    # ------------------------------------------------------------------
+    # FORMATO ENRIQUECIDO (RICH_NOTIFICATIONS=True)
+    # ------------------------------------------------------------------
+
+    def _notify_positions_summary_rich(self, positions: list, balance: float, mode: str):
+        """
+        Formato enriquecido v2:
+        - Agrupa posiciones por evento (market title) con cabecera visible.
+        - Muestra por cada ticket: precio entrada, precio actual (en vivo desde
+          la API via main.py), valor en dólares, P&L $ y P&L %.
+        - Separador visual entre eventos.
+        - Etiqueta de fuente añadida en el campo 'price_source' de cada posición.
+        - Todo el texto en español.
+        """
+        emoji_mode = "🔴" if mode == "REAL" else "📄"
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        if not positions:
+            message = (
+                f"📊 <b>PORTFOLIO — {mode}</b>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"💰 <b>Cash:</b> ${balance:.2f}\n"
+                f"📂 <b>Posiciones abiertas:</b> 0\n\n"
+                f"⏰ {now_str}"
+            )
+            self.send_message(message, silent=True)
+            return
+
+        # --- Agrupar posiciones por nombre de evento ---
+        events: dict[str, list] = {}
+        for pos in positions:
+            key = pos.get('event_slug', 'Evento Desconocido')
+            events.setdefault(key, []).append(pos)
+
+        # --- Calcular totales del portfolio ---
+        total_invested = 0.0
+        total_pnl = 0.0
+        for pos in positions:
+            size = pos.get('size', 0)
+            entry = pos.get('avg_entry_price', 0)
+            current = pos.get('current_price', 0)
+            invested = size * entry
+            # Usar unrealized_pnl si está disponible; si no, calcularlo
+            pnl = pos.get('unrealized_pnl', 0)
+            if pnl == 0 and current > 0:
+                pnl = (current - entry) * size          # [FUENTE: calculado]
+            total_invested += invested
+            total_pnl += pnl
+
+        # --- Construir mensaje por bloques ---
+        lines = [f"{emoji_mode} <b>PORTFOLIO — {mode}</b>"]
+
+        for event_name, event_positions in events.items():
+            # Cabecera del evento
+            lines.append(f"\n🗓 <b>{event_name}</b>")
+
+            # Tabla monoespaciada con una fila por ticket
+            # Columnas: Ticket | Entr | Act | Valor | P&L$ | P&L%
+            COL = "─" * 52
+            header = f"{'Ticket':<10} {'Entr':>5} {'Act':>5} {'Valor':>7} {'P&L $':>7} {'P&L%':>6}"
+            rows = [COL, header, COL]
+
+            for pos in event_positions:
+                bucket    = pos.get('range_label', 'N/A')
+                entry     = pos.get('avg_entry_price', 0)
+                current   = pos.get('current_price', 0)
+                size      = pos.get('size', 0)
+                invested  = size * entry                    # [FUENTE: calculado]
+                source    = pos.get('price_source', 'caché')  # etiqueta de fuente
+
+                pnl_dollar = pos.get('unrealized_pnl', 0)
+                if pnl_dollar == 0 and current > 0:
+                    pnl_dollar = (current - entry) * size  # [FUENTE: calculado]
+
+                pnl_pct = (pnl_dollar / invested * 100) if invested > 0 else 0.0
+                # Signo explícito para P&L en dólares (+ / -)
+                pnl_sign_d = "+" if pnl_dollar >= 0 else "-"
+
+                # Log en consola con etiqueta de fuente para trazabilidad
+                print(
+                    f"[Telegram][FUENTE: {source}] "
+                    f"Bucket={bucket} "
+                    f"Entrada={entry:.3f} "
+                    f"Actual={current:.3f} "
+                    f"Valor=${invested:.2f} "
+                    f"P&L={pnl_sign_d}${abs(pnl_dollar):.2f} ({pnl_pct:+.1f}%)"
+                )
+
+                row = (
+                    f"{bucket:<10} "
+                    f"{entry*100:>4.0f}¢ "
+                    f"{current*100:>4.0f}¢ "
+                    f"${invested:>6.2f} "
+                    f"{pnl_sign_d}${abs(pnl_dollar):>4.2f} "
+                    f"{pnl_pct:>+5.1f}%"
+                )
+                rows.append(row)
+
+            rows.append(COL)
+            lines.append(f"<pre>{chr(10).join(rows)}</pre>")
+
+        # --- Totales del portfolio ---
+        total_equity = balance + total_invested + total_pnl
+        pnl_sign = "+" if total_pnl >= 0 else ""
+        pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+
+        lines.append("━━━━━━━━━━━━━━━━")
+        lines.append(f"💰 <b>Cash:</b> ${balance:.2f}")
+        lines.append(f"📊 <b>Invertido:</b> ${total_invested:.2f}")
+        lines.append(f"💼 <b>Equity total:</b> ${total_equity:.2f}")
+        lines.append(f"{pnl_emoji} <b>P&amp;L no realizado:</b> {pnl_sign}${total_pnl:.2f}")
+        lines.append(f"\n⏰ {now_str}")
+
+        message = "\n".join(lines)
+        self.send_message(message, silent=True)
+
+    # ------------------------------------------------------------------
+    # FORMATO SIMPLE ORIGINAL (RICH_NOTIFICATIONS=False)
+    # ------------------------------------------------------------------
+
+    def _notify_positions_summary_simple(self, positions: list, balance: float, mode: str):
+        """Formato compacto original — tabla única sin agrupación por evento."""
         emoji = "🔴" if mode == "REAL" else "📄"
 
         if not positions:
@@ -228,13 +374,11 @@ class TelegramNotifier:
         positions_table += "EVENTO      BUCKET  AVG NOW P&L\n"
         positions_table += "──────────────────────────\n"
 
-        # Construir filas
         for pos in positions:
-            # Event label (e.g., "Feb13-Feb20")
-            event = pos.get('event_slug', '')[:11]  # Truncate to fit
+            event = pos.get('event_slug', '')[:11]
             bucket = pos.get('range_label', 'N/A')
-            entry = pos.get('avg_entry_price', 0) * 100  # a centavos
-            current = pos.get('current_price', 0) * 100  # a centavos
+            entry = pos.get('avg_entry_price', 0) * 100
+            current = pos.get('current_price', 0) * 100
             pnl = pos.get('unrealized_pnl', 0)
             pnl_sign = "+" if pnl >= 0 else ""
 
@@ -242,7 +386,6 @@ class TelegramNotifier:
 
         positions_table += "</code>"
 
-        # Construir mensaje completo
         pnl_sign = "+" if total_unrealized_pnl >= 0 else ""
         pnl_emoji = "📈" if total_unrealized_pnl >= 0 else "📉"
 
