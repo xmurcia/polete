@@ -7,7 +7,7 @@ import os
 import time
 from typing import Dict, Set, List, Optional
 from dotenv import load_dotenv
-from py_clob_client.clob_types import OrderArgs
+from py_clob_client.clob_types import OrderArgs, MarketOrderArgs, PartialCreateOrderOptions
 
 try:
     from .models import OrderRequest, OrderResult, TrackedOrder, Side, OrderType
@@ -77,34 +77,69 @@ class OrderManager:
         try:
             print(f"[OrderManager] Placing {request.order_type} {request.side} order: {request.range_label}")
 
-            # Round price to 3 decimals (tick size 0.001)
+            # Use proper market order creation for FOK/IOC orders
+            # This handles decimal precision internally
             price = round(request.price, 3)
             price = max(price, 0.001)
 
-            # Calculate size such that price × size is a multiple of 0.01
-            # This ensures maker_amount has exactly 2 decimals
-            target_amount = round(price * request.size, 2)  # Round to cents
-            size = round(target_amount / price, 2)  # Recalculate size
+            # For market orders (FOK/IOC): amount means different things
+            # BUY: amount = USD to spend
+            # SELL: amount = shares to sell
+            if request.side.value == "BUY":
+                amount = round(price * request.size, 2)  # USD amount
+            else:
+                amount = request.size  # Share amount
 
-            print(f"[OrderManager] Final: price={price}, size={size}, amount={target_amount}")
+            print(f"[OrderManager] Creating {request.order_type} {request.side} order")
+            print(f"[OrderManager] Price: {price}, Amount: {amount}")
 
-            # Create and post order
-            order_args = OrderArgs(
-                token_id=request.token_id,
-                price=price,
-                size=size,
-                side=request.side.value,
-                fee_rate_bps=0
-            )
-            signed_order = self.client.create_order(order_args)
+            # Use create_market_order for FOK/IOC (handles precision internally)
+            if request.order_type.value in ["FOK", "IOC"]:
+                market_order_args = MarketOrderArgs(
+                    token_id=request.token_id,
+                    amount=amount,
+                    side=request.side.value,
+                    price=price,  # worst-price limit (slippage protection)
+                    fee_rate_bps=0,
+                    nonce=0,
+                    taker="0x0000000000000000000000000000000000000000",
+                    order_type=request.order_type
+                )
 
-            result = self.client.post_order(signed_order, request.order_type.value)
+                options = PartialCreateOrderOptions(
+                    tick_size="0.001",
+                    neg_risk=False
+                )
+
+                signed_order = self.client.create_market_order(
+                    order_args=market_order_args,
+                    options=options
+                )
+
+                result = self.client.post_order(signed_order, request.order_type.value)
+            else:
+                # For limit orders, use traditional approach
+                order_args = OrderArgs(
+                    token_id=request.token_id,
+                    price=price,
+                    size=request.size,
+                    side=request.side.value,
+                    fee_rate_bps=0
+                )
+                signed_order = self.client.create_order(order_args)
+                result = self.client.post_order(signed_order, request.order_type.value)
 
             if not result or not result.get("orderID"):
                 print(f"[OrderManager] ❌ Order failed: No orderID returned")
                 return OrderResult(success=False, error="No orderID returned")
 
             order_id = result["orderID"]
+
+            # Calculate size for tracking (reverse calculation from amount)
+            if request.side.value == "BUY":
+                tracked_size = amount / price  # shares = USD / price
+            else:
+                tracked_size = amount  # shares for SELL
 
             # Track order
             tracked = TrackedOrder(
@@ -115,7 +150,7 @@ class OrderManager:
                 side=request.side,
                 order_type=request.order_type,
                 price=price,
-                size=size,
+                size=tracked_size,
                 timestamp=int(time.time()),
                 market_title=request.market_title,
                 token_side=request.token_side
