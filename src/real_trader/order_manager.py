@@ -91,9 +91,9 @@ class OrderManager:
             from decimal import Decimal, ROUND_DOWN
             price = float(Decimal(str(price)).quantize(Decimal('0.01'), rounding=ROUND_DOWN))
 
-            # For market orders (FOK) as TAKER:
-            # - BUY: maker_amount = size (shares received, max 2 decimals)
-            #        taker_amount = price × size (USDC spent, max 5 decimals)
+            # For FOK orders, Polymarket SDK interprets:
+            # - BUY: maker_amount = price × size (USDC spent, max 2 decimals!)
+            #        taker_amount = size (shares received, max 5 decimals)
             # - SELL: maker_amount = price × size (USDC received, max 2 decimals)
             #         taker_amount = size (shares sold, max 5 decimals)
             if request.side == Side.BUY:
@@ -101,29 +101,47 @@ class OrderManager:
                 price_dec = Decimal(str(price))
                 size_dec = Decimal(str(request.size))
 
-                # Round size to 2 decimals (maker_amount requirement)
-                size_dec = size_dec.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+                # Step 1: Round size to 5 decimals (taker_amount)
+                size_dec = size_dec.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
-                # Calculate taker_amount with exact precision
-                taker_amount_dec = price_dec * size_dec
+                # Step 2: Calculate maker_amount (USDC spent) with exact precision
+                maker_amount_dec = price_dec * size_dec
 
-                # Round taker_amount to 5 decimals
-                taker_amount_dec = taker_amount_dec.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+                # Step 3: Round maker_amount to 2 decimals (API requirement!)
+                maker_amount_dec = maker_amount_dec.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+                # Step 4: Recalculate size from rounded maker_amount to ensure consistency
+                size_dec = maker_amount_dec / price_dec if price_dec > 0 else Decimal('0')
+                size_dec = size_dec.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
 
                 # Convert back to float for OrderArgs
                 size = float(size_dec)
-                taker_amount = float(taker_amount_dec)
+                maker_amount = float(maker_amount_dec)
 
-                print(f"[OrderManager] BUY: size={size} shares, taker_amount=${taker_amount} USDC (price×size={price*size})")
+                print(f"[OrderManager] BUY: size={size} shares, maker_amount=${maker_amount} USDC (price×size must be ≤2 dec)")
             else:  # SELL
-                # Round size (shares sold) to 5 decimals first
-                size = float(Decimal(str(request.size)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
-                # Then ensure maker_amount (USDC received) has max 2 decimals
-                maker_amount = float(Decimal(str(price * size)).quantize(Decimal('0.01'), rounding=ROUND_DOWN))
-                # Recalculate size from rounded maker_amount and round to 5 decimals
-                size_calc = maker_amount / price if price > 0 else 0
-                size = float(Decimal(str(size_calc)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
-                print(f"[OrderManager] SELL: size={size:.5f} shares, maker_amount=${maker_amount:.2f} USDC")
+                # Use Decimal arithmetic for SELL orders
+                price_dec = Decimal(str(price))
+                size_dec = Decimal(str(request.size))
+
+                # Step 1: Round size to 5 decimals (taker_amount)
+                size_dec = size_dec.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+
+                # Step 2: Calculate maker_amount (USDC received)
+                maker_amount_dec = price_dec * size_dec
+
+                # Step 3: Round maker_amount to 2 decimals (API requirement!)
+                maker_amount_dec = maker_amount_dec.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+                # Step 4: Recalculate size from rounded maker_amount
+                size_dec = maker_amount_dec / price_dec if price_dec > 0 else Decimal('0')
+                size_dec = size_dec.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+
+                # Convert back to float for OrderArgs
+                size = float(size_dec)
+                maker_amount = float(maker_amount_dec)
+
+                print(f"[OrderManager] SELL: size={size} shares, maker_amount=${maker_amount} USDC (price×size must be ≤2 dec)")
 
             print(f"[OrderManager] Final: price={price:.2f}, size={size}, price×size={price*size:.6f}")
 
