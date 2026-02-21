@@ -461,7 +461,7 @@ DAILY_MULTIPLIERS = {
 # ==============================================================================
 
 # Main loop delay between iterations
-LOOP_DELAY_SECONDS = 8
+LOOP_DELAY_SECONDS = 5
 
 # Delay after error before retry
 LOOP_ERROR_RETRY_SECONDS = 5
