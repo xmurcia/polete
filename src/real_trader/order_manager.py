@@ -86,7 +86,7 @@ class OrderManager:
 
             # Enforce minimum price
             price = max(price, 0.001)
-            size = int(request.size)
+            size = request.size
 
             # Create and post order
             order_args = OrderArgs(
