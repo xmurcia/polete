@@ -538,6 +538,11 @@ THREAD_POOL_MAX_WORKERS = 5
 # DISPLAY & FORMATTING
 # ==============================================================================
 
+# Activar/desactivar el formato enriquecido de mensajes de Telegram.
+# True  → mensajes agrupados por evento con P&L en vivo, emojis y tabla monoespaciada.
+# False → formato compacto original (tabla simple en una sola línea).
+RICH_NOTIFICATIONS = True
+
 # Decimal precision for different value types
 PRICE_DECIMAL_PLACES = 3   # $0.123
 PNL_DECIMAL_PLACES = 2     # $12.34

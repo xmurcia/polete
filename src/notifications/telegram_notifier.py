@@ -1,6 +1,12 @@
 """
 Notificaciones de Telegram para Bot de Trading Polymarket
-Envía notificaciones de trades, P&L y alertas
+Envía notificaciones de trades, P&L y alertas.
+
+Cambios v2:
+- notify_positions_summary ahora agrupa por evento y muestra precio en vivo,
+  valor de la apuesta en dólares, P&L $ y P&L % por cada ticket (bucket).
+- El flag RICH_NOTIFICATIONS (config.py) activa/desactiva el nuevo formato.
+- Los valores de precio se etiquetan con su fuente: [FUENTE: clob | calculado | caché].
 """
 
 import os
@@ -10,6 +16,12 @@ from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Importar flag de configuración (con fallback a True por si config no carga)
+try:
+    from config import RICH_NOTIFICATIONS
+except ImportError:
+    RICH_NOTIFICATIONS = True
 
 
 class TelegramNotifier:
@@ -56,52 +68,96 @@ class TelegramNotifier:
                         balance: float, invested: float = 0, mode: str = "REAL",
                         strategy: str = "STANDARD"):
         """Notificar compra ejecutada"""
-        emoji = "🔴" if mode == "REAL" else "📄"
+        mode_emoji = "🔴" if mode == "REAL" else "📄"
 
-        # Precio objetivo (95¢ normal, 99¢ moonshot)
-        target_price = 0.95 if strategy != "MOONSHOT" else 0.99
-        price_cents = price * 100
+        # Emoji y objetivo según estrategia
+        if strategy == "MOONSHOT":
+            strat_emoji = "🌙"
+            target_price = 0.99
+        elif strategy == "LOTTO":
+            strat_emoji = "🎰"
+            target_price = 0.95
+        elif strategy == "HEDGE":
+            strat_emoji = "🛡"
+            target_price = 0.95
+        else:
+            strat_emoji = "📈"
+            target_price = 0.95
+
+        price_cents  = price * 100
         target_cents = target_price * 100
+        upside_pct   = ((target_price - price) / price * 100) if price > 0 else 0
+        odds         = (target_price / price) if price > 0 else 0
 
-        message = f"""
-{emoji} <b>{mode} - COMPRA</b>
-━━━━━━━━━━━━━━━━
-<b>Evento:</b> {market[:30]}
-<b>Bucket:</b> {bucket}
-<b>Entrada:</b> {price_cents:.0f}¢ → <b>Objetivo:</b> {target_cents:.0f}¢
-<b>Tamaño:</b> ${amount:.2f} ({shares:.1f} shares)
-<b>Razón:</b> {reason}
-<b>Estrategia:</b> {strategy}
-━━━━━━━━━━━━━━━━
-💰 <b>Cash:</b> ${balance:.2f}
-📊 <b>Invertido:</b> ${invested:.2f}
-⏰ {datetime.now().strftime('%H:%M:%S')}
-"""
-        self.send_message(message.strip())
+        message = (
+            f"{strat_emoji} <b>COMPRA {strategy}</b>  {mode_emoji} <i>{mode}</i>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📋 <b>{market}</b>\n"
+            f"📦 Bucket: <b>{bucket}</b>\n"
+            f"\n"
+            f"💵 Entrada:   <b>{price_cents:.1f}¢</b>\n"
+            f"🎯 Objetivo:  <b>{target_cents:.0f}¢</b>  <i>(+{upside_pct:.0f}%  ·  {odds:.1f}x)</i>\n"
+            f"\n"
+            f"📐 Tamaño:    <b>${amount:.2f}</b>  ({shares:.1f} shares)\n"
+            f"💡 Razón:     {reason}\n"
+            f"\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"💰 Cash: ${balance:.2f}   📊 Invertido: ${invested:.2f}\n"
+            f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+        )
+        self.send_message(message)
 
     def notify_trade_sell(self, market: str, bucket: str, price: float,
                          shares: float, pnl: float, pnl_pct: float,
-                         balance: float, reason: str = "", mode: str = "REAL"):
+                         balance: float, reason: str = "", mode: str = "REAL",
+                         entry_price: float = 0, strategy: str = "STANDARD"):
         """Notificar venta ejecutada"""
-        emoji = "🔴" if mode == "REAL" else "📄"
-        pnl_emoji = "💰" if pnl > 0 else "📉"
-        pnl_sign = "+" if pnl >= 0 else ""
+        mode_emoji = "🔴" if mode == "REAL" else "📄"
+
+        # Resultado visual
+        if pnl > 0:
+            result_emoji = "🏆" if pnl_pct >= 50 else "✅"
+            result_label = "GANANCIA"
+            pnl_sign = "+"
+        else:
+            result_emoji = "💔" if pnl_pct <= -40 else "🔻"
+            result_label = "PÉRDIDA"
+            pnl_sign = ""
+
         price_cents = price * 100
 
-        message = f"""
-{emoji} <b>{mode} - VENTA</b>
-━━━━━━━━━━━━━━━━
-<b>Evento:</b> {market[:30]}
-<b>Bucket:</b> {bucket}
-<b>Salida:</b> {price_cents:.0f}¢ ({shares:.1f} shares)
-{f"<b>Razón:</b> {reason}" if reason else ""}
+        # Línea entrada→salida solo si tenemos entry_price
+        entry_line = ""
+        if entry_price > 0:
+            entry_cents = entry_price * 100
+            arrow = "📈" if price >= entry_price else "📉"
+            entry_line = f"{arrow} Recorrido:  {entry_cents:.1f}¢  →  <b>{price_cents:.1f}¢</b>\n"
 
-{pnl_emoji} <b>P&L:</b> {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.1f}%)
-━━━━━━━━━━━━━━━━
-💰 <b>Balance:</b> ${balance:.2f}
-⏰ {datetime.now().strftime('%H:%M:%S')}
-"""
-        self.send_message(message.strip())
+        # Multiplicador de ganancia para victorias grandes
+        multiplier_line = ""
+        if pnl > 0 and entry_price > 0 and entry_price < price:
+            mult = price / entry_price
+            multiplier_line = f"🚀 Multiplicador: <b>{mult:.1f}x</b>\n"
+
+        message = (
+            f"{result_emoji} <b>VENTA {result_label}</b>  {mode_emoji} <i>{mode}</i>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📋 <b>{market}</b>\n"
+            f"📦 Bucket: <b>{bucket}</b>\n"
+            f"\n"
+            f"{entry_line}"
+            f"💵 Salida:    <b>{price_cents:.1f}¢</b>  ({shares:.1f} shares)\n"
+            f"🏷 Razón:     {reason}\n"
+            f"\n"
+            f"── Resultado ──────────────\n"
+            f"{'📈' if pnl >= 0 else '📉'} P&amp;L:     <b>{pnl_sign}${pnl:.2f}</b>\n"
+            f"📊 Rendimiento: <b>{pnl_sign}{pnl_pct:.1f}%</b>\n"
+            f"{multiplier_line}"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"💰 Balance: ${balance:.2f}\n"
+            f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+        )
+        self.send_message(message)
 
     def notify_daily_loss_warning(self, daily_pnl: float, limit: float):
         """Notificar que se acerca el límite de pérdida diaria"""
@@ -202,8 +258,135 @@ class TelegramNotifier:
 """
         self.send_message(message.strip(), silent=True)
 
+    # ------------------------------------------------------------------
+    # PORTFOLIO SUMMARY — Dispatcher RICH / SIMPLE según RICH_NOTIFICATIONS
+    # ------------------------------------------------------------------
+
     def notify_positions_summary(self, positions: list, balance: float, mode: str):
-        """Enviar resumen completo de posiciones (cada 2 horas)"""
+        """
+        Enviar resumen completo de posiciones (cada 2 horas).
+        Redirige al formato enriquecido o al simple según RICH_NOTIFICATIONS.
+        """
+        if RICH_NOTIFICATIONS:
+            self._notify_positions_summary_rich(positions, balance, mode)
+        else:
+            self._notify_positions_summary_simple(positions, balance, mode)
+
+    # ------------------------------------------------------------------
+    # FORMATO ENRIQUECIDO (RICH_NOTIFICATIONS=True)
+    # ------------------------------------------------------------------
+
+    def _notify_positions_summary_rich(self, positions: list, balance: float, mode: str):
+        """
+        Formato enriquecido v2:
+        - Agrupa posiciones por evento (market title) con cabecera visible.
+        - Muestra por cada ticket: precio entrada, precio actual (en vivo desde
+          la API via main.py), valor en dólares, P&L $ y P&L %.
+        - Separador visual entre eventos.
+        - Etiqueta de fuente añadida en el campo 'price_source' de cada posición.
+        - Todo el texto en español.
+        """
+        emoji_mode = "🔴" if mode == "REAL" else "📄"
+        now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        if not positions:
+            message = (
+                f"📊 <b>PORTFOLIO — {mode}</b>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"💰 <b>Cash:</b> ${balance:.2f}\n"
+                f"📂 <b>Posiciones abiertas:</b> 0\n\n"
+                f"⏰ {now_str}"
+            )
+            self.send_message(message, silent=True)
+            return
+
+        # --- Agrupar posiciones por nombre de evento ---
+        events: dict[str, list] = {}
+        for pos in positions:
+            key = pos.get('event_slug', 'Evento Desconocido')
+            events.setdefault(key, []).append(pos)
+
+        # --- Calcular totales del portfolio ---
+        total_invested = 0.0
+        total_pnl = 0.0
+        for pos in positions:
+            size = pos.get('size', 0)
+            entry = pos.get('avg_entry_price', 0)
+            current = pos.get('current_price', 0)
+            invested = size * entry
+            # Usar unrealized_pnl si está disponible; si no, calcularlo
+            pnl = pos.get('unrealized_pnl', 0)
+            if pnl == 0 and current > 0:
+                pnl = (current - entry) * size          # [FUENTE: calculado]
+            total_invested += invested
+            total_pnl += pnl
+
+        # --- Construir mensaje por bloques ---
+        lines = [f"{emoji_mode} <b>PORTFOLIO — {mode}</b>"]
+
+        event_list = list(events.items())
+        for idx_evt, (event_name, event_positions) in enumerate(event_list):
+            # Cabecera del evento
+            lines.append(f"\n🗓 <b>{event_name}</b>")
+
+            for idx_pos, pos in enumerate(event_positions):
+                bucket    = pos.get('range_label', 'N/A')
+                entry     = pos.get('avg_entry_price', 0)
+                current   = pos.get('current_price', 0)
+                size      = pos.get('size', 0)
+                invested  = size * entry
+                source    = pos.get('price_source', 'caché')
+
+                pnl_dollar = pos.get('unrealized_pnl', 0)
+                if pnl_dollar == 0 and current > 0:
+                    pnl_dollar = (current - entry) * size
+
+                pnl_pct = (pnl_dollar / invested * 100) if invested > 0 else 0.0
+                pnl_sign = "+" if pnl_dollar >= 0 else "-"
+                pnl_emoji = "📈" if pnl_dollar >= 0 else "📉"
+
+                # Log en consola con etiqueta de fuente para trazabilidad
+                print(
+                    f"[Telegram][FUENTE: {source}] "
+                    f"Bucket={bucket} "
+                    f"Entrada={entry:.3f} "
+                    f"Actual={current:.3f} "
+                    f"Valor=${invested:.2f} "
+                    f"P&L={pnl_sign}${abs(pnl_dollar):.2f} ({pnl_pct:+.1f}%)"
+                )
+
+                lines.append(
+                    f"\n📦 <b>{bucket}</b>\n"
+                    f"  Entrada: {entry*100:.0f}¢  →  Actual: {current*100:.0f}¢  <i>[{source}]</i>\n"
+                    f"  Valor invertido: ${invested:.2f}\n"
+                    f"  {pnl_emoji} P&amp;L: {pnl_sign}${abs(pnl_dollar):.2f}  ({pnl_pct:+.1f}%)"
+                )
+
+            # Separador entre eventos (no al final del último)
+            if idx_evt < len(event_list) - 1:
+                lines.append("\n━━━━━━━━━━━━━━━━")
+
+        # --- Totales del portfolio ---
+        total_equity = balance + total_invested + total_pnl
+        pnl_sign = "+" if total_pnl >= 0 else ""
+        pnl_emoji = "📈" if total_pnl >= 0 else "📉"
+
+        lines.append("━━━━━━━━━━━━━━━━")
+        lines.append(f"💰 <b>Cash:</b> ${balance:.2f}")
+        lines.append(f"📊 <b>Invertido:</b> ${total_invested:.2f}")
+        lines.append(f"💼 <b>Equity total:</b> ${total_equity:.2f}")
+        lines.append(f"{pnl_emoji} <b>P&amp;L no realizado:</b> {pnl_sign}${total_pnl:.2f}")
+        lines.append(f"\n⏰ {now_str}")
+
+        message = "\n".join(lines)
+        self.send_message(message, silent=True)
+
+    # ------------------------------------------------------------------
+    # FORMATO SIMPLE ORIGINAL (RICH_NOTIFICATIONS=False)
+    # ------------------------------------------------------------------
+
+    def _notify_positions_summary_simple(self, positions: list, balance: float, mode: str):
+        """Formato compacto original — tabla única sin agrupación por evento."""
         emoji = "🔴" if mode == "REAL" else "📄"
 
         if not positions:
@@ -228,13 +411,11 @@ class TelegramNotifier:
         positions_table += "EVENTO      BUCKET  AVG NOW P&L\n"
         positions_table += "──────────────────────────\n"
 
-        # Construir filas
         for pos in positions:
-            # Event label (e.g., "Feb13-Feb20")
-            event = pos.get('event_slug', '')[:11]  # Truncate to fit
+            event = pos.get('event_slug', '')[:11]
             bucket = pos.get('range_label', 'N/A')
-            entry = pos.get('avg_entry_price', 0) * 100  # a centavos
-            current = pos.get('current_price', 0) * 100  # a centavos
+            entry = pos.get('avg_entry_price', 0) * 100
+            current = pos.get('current_price', 0) * 100
             pnl = pos.get('unrealized_pnl', 0)
             pnl_sign = "+" if pnl >= 0 else ""
 
@@ -242,7 +423,6 @@ class TelegramNotifier:
 
         positions_table += "</code>"
 
-        # Construir mensaje completo
         pnl_sign = "+" if total_unrealized_pnl >= 0 else ""
         pnl_emoji = "📈" if total_unrealized_pnl >= 0 else "📉"
 
