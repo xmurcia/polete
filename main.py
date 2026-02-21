@@ -327,7 +327,11 @@ def run():
                                     if bid > current_max:
                                         pos_data['max_price_seen'] = bid
                                         current_max = bid
-                                        trader._save()
+                                        # Save via PaperTrader (compatible with both UnifiedTrader and PaperTrader)
+                                        if hasattr(trader, '_paper_trader'):
+                                            trader._paper_trader._save()
+                                        elif hasattr(trader, '_save'):
+                                            trader._save()
 
                                     if current_max >= MOONSHOT_TRAILING_PEAK_THRESHOLD:
                                         drawdown_from_peak = current_max - bid
@@ -423,18 +427,28 @@ def run():
                             volatility_buffer = int(decayed_std * PROXIMITY_VOLATILITY_MULTIPLIER)
                             buy_safety = base_threshold + volatility_buffer
 
-                            if bucket_headroom < buy_safety: continue
+                            if bucket_headroom < buy_safety:
+                                print(f"[BUY_DEBUG] {b['bucket']}: ❌ headroom={bucket_headroom} < buy_safety={buy_safety} (base={base_threshold}+vol={volatility_buffer})")
+                                continue
 
                             is_impossible = False
                             if m_poly['hours'] < TIME_REMAINING_HOURS_VERY_LATE:
                                 tweets_needed = b['min'] - m_poly['count']
-                                if tweets_needed > (m_poly['hours'] * IMPOSSIBLE_TWEETS_PER_HOUR): is_impossible = True
+                                if tweets_needed > (m_poly['hours'] * IMPOSSIBLE_TWEETS_PER_HOUR):
+                                    is_impossible = True
+                                    print(f"[BUY_DEBUG] {b['bucket']}: ❌ impossible (need {tweets_needed} tweets in {m_poly['hours']:.1f}h)")
 
                             if not is_impossible:
-                                if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
+                                if z_score > MAX_Z_SCORE_ENTRY:
+                                    print(f"[BUY_DEBUG] {b['bucket']}: ❌ z_score={z_score:.2f} > MAX={MAX_Z_SCORE_ENTRY} (mean={final_mean:.1f}, std={decayed_std:.1f})")
+                                elif ask < MIN_PRICE_ENTRY:
+                                    print(f"[BUY_DEBUG] {b['bucket']}: ❌ ask={ask:.4f} < MIN={MIN_PRICE_ENTRY}")
+                                else:
                                     edge = fair - ask
                                     dynamic_min_edge = MIN_EDGE_BASE + (decayed_std * EDGE_STD_MULTIPLIER)
-                                    if edge > dynamic_min_edge:
+                                    if edge <= dynamic_min_edge:
+                                        print(f"[BUY_DEBUG] {b['bucket']}: ❌ edge={edge:.4f} <= min_edge={dynamic_min_edge:.4f} (fair={fair:.4f}, ask={ask:.4f}, std={decayed_std:.1f})")
+                                    else:
                                         action = "BUY"; reason = f"Val+{edge:.2f}"
                                         res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
                                         if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
