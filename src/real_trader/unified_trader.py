@@ -420,7 +420,9 @@ class UnifiedTrader:
                         pnl_pct=(profit / cost) * 100 if cost > 0 else 0.0,
                         balance=cash_after,
                         reason=reason,
-                        mode="REAL"
+                        mode="REAL",
+                        entry_price=position.avg_entry_price,
+                        strategy=strategy_tag
                     )
 
                 print(f"[UnifiedTrader] 💰 SELL: P&L ${profit:.2f} - Order {result.order_id}")

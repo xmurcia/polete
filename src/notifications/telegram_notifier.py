@@ -68,52 +68,96 @@ class TelegramNotifier:
                         balance: float, invested: float = 0, mode: str = "REAL",
                         strategy: str = "STANDARD"):
         """Notificar compra ejecutada"""
-        emoji = "🔴" if mode == "REAL" else "📄"
+        mode_emoji = "🔴" if mode == "REAL" else "📄"
 
-        # Precio objetivo (95¢ normal, 99¢ moonshot)
-        target_price = 0.95 if strategy != "MOONSHOT" else 0.99
-        price_cents = price * 100
+        # Emoji y objetivo según estrategia
+        if strategy == "MOONSHOT":
+            strat_emoji = "🌙"
+            target_price = 0.99
+        elif strategy == "LOTTO":
+            strat_emoji = "🎰"
+            target_price = 0.95
+        elif strategy == "HEDGE":
+            strat_emoji = "🛡"
+            target_price = 0.95
+        else:
+            strat_emoji = "📈"
+            target_price = 0.95
+
+        price_cents  = price * 100
         target_cents = target_price * 100
+        upside_pct   = ((target_price - price) / price * 100) if price > 0 else 0
+        odds         = (target_price / price) if price > 0 else 0
 
-        message = f"""
-{emoji} <b>{mode} - COMPRA</b>
-━━━━━━━━━━━━━━━━
-<b>Evento:</b> {market[:30]}
-<b>Bucket:</b> {bucket}
-<b>Entrada:</b> {price_cents:.0f}¢ → <b>Objetivo:</b> {target_cents:.0f}¢
-<b>Tamaño:</b> ${amount:.2f} ({shares:.1f} shares)
-<b>Razón:</b> {reason}
-<b>Estrategia:</b> {strategy}
-━━━━━━━━━━━━━━━━
-💰 <b>Cash:</b> ${balance:.2f}
-📊 <b>Invertido:</b> ${invested:.2f}
-⏰ {datetime.now().strftime('%H:%M:%S')}
-"""
-        self.send_message(message.strip())
+        message = (
+            f"{strat_emoji} <b>COMPRA {strategy}</b>  {mode_emoji} <i>{mode}</i>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📋 <b>{market}</b>\n"
+            f"📦 Bucket: <b>{bucket}</b>\n"
+            f"\n"
+            f"💵 Entrada:   <b>{price_cents:.1f}¢</b>\n"
+            f"🎯 Objetivo:  <b>{target_cents:.0f}¢</b>  <i>(+{upside_pct:.0f}%  ·  {odds:.1f}x)</i>\n"
+            f"\n"
+            f"📐 Tamaño:    <b>${amount:.2f}</b>  ({shares:.1f} shares)\n"
+            f"💡 Razón:     {reason}\n"
+            f"\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"💰 Cash: ${balance:.2f}   📊 Invertido: ${invested:.2f}\n"
+            f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+        )
+        self.send_message(message)
 
     def notify_trade_sell(self, market: str, bucket: str, price: float,
                          shares: float, pnl: float, pnl_pct: float,
-                         balance: float, reason: str = "", mode: str = "REAL"):
+                         balance: float, reason: str = "", mode: str = "REAL",
+                         entry_price: float = 0, strategy: str = "STANDARD"):
         """Notificar venta ejecutada"""
-        emoji = "🔴" if mode == "REAL" else "📄"
-        pnl_emoji = "💰" if pnl > 0 else "📉"
-        pnl_sign = "+" if pnl >= 0 else ""
+        mode_emoji = "🔴" if mode == "REAL" else "📄"
+
+        # Resultado visual
+        if pnl > 0:
+            result_emoji = "🏆" if pnl_pct >= 50 else "✅"
+            result_label = "GANANCIA"
+            pnl_sign = "+"
+        else:
+            result_emoji = "💔" if pnl_pct <= -40 else "🔻"
+            result_label = "PÉRDIDA"
+            pnl_sign = ""
+
         price_cents = price * 100
 
-        message = f"""
-{emoji} <b>{mode} - VENTA</b>
-━━━━━━━━━━━━━━━━
-<b>Evento:</b> {market[:30]}
-<b>Bucket:</b> {bucket}
-<b>Salida:</b> {price_cents:.0f}¢ ({shares:.1f} shares)
-{f"<b>Razón:</b> {reason}" if reason else ""}
+        # Línea entrada→salida solo si tenemos entry_price
+        entry_line = ""
+        if entry_price > 0:
+            entry_cents = entry_price * 100
+            arrow = "📈" if price >= entry_price else "📉"
+            entry_line = f"{arrow} Recorrido:  {entry_cents:.1f}¢  →  <b>{price_cents:.1f}¢</b>\n"
 
-{pnl_emoji} <b>P&L:</b> {pnl_sign}${pnl:.2f} ({pnl_sign}{pnl_pct:.1f}%)
-━━━━━━━━━━━━━━━━
-💰 <b>Balance:</b> ${balance:.2f}
-⏰ {datetime.now().strftime('%H:%M:%S')}
-"""
-        self.send_message(message.strip())
+        # Multiplicador de ganancia para victorias grandes
+        multiplier_line = ""
+        if pnl > 0 and entry_price > 0 and entry_price < price:
+            mult = price / entry_price
+            multiplier_line = f"🚀 Multiplicador: <b>{mult:.1f}x</b>\n"
+
+        message = (
+            f"{result_emoji} <b>VENTA {result_label}</b>  {mode_emoji} <i>{mode}</i>\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"📋 <b>{market}</b>\n"
+            f"📦 Bucket: <b>{bucket}</b>\n"
+            f"\n"
+            f"{entry_line}"
+            f"💵 Salida:    <b>{price_cents:.1f}¢</b>  ({shares:.1f} shares)\n"
+            f"🏷 Razón:     {reason}\n"
+            f"\n"
+            f"── Resultado ──────────────\n"
+            f"{'📈' if pnl >= 0 else '📉'} P&amp;L:     <b>{pnl_sign}${pnl:.2f}</b>\n"
+            f"📊 Rendimiento: <b>{pnl_sign}{pnl_pct:.1f}%</b>\n"
+            f"{multiplier_line}"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"💰 Balance: ${balance:.2f}\n"
+            f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+        )
+        self.send_message(message)
 
     def notify_daily_loss_warning(self, daily_pnl: float, limit: float):
         """Notificar que se acerca el límite de pérdida diaria"""
