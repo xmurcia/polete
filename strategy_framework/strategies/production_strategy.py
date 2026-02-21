@@ -13,9 +13,11 @@ from datetime import datetime, timedelta
 import re
 from scipy.stats import norm
 from .base_strategy import BaseStrategy, Signal, SignalType, MarketState, Position
+from ..utils import detect_event_type
 from ..production_config import (
     MAX_Z_SCORE_ENTRY, MIN_PRICE_ENTRY, MIN_EDGE,
     ENABLE_CLUSTERING, CLUSTER_RANGE,
+    CLUSTER_MULTIPLIER_SHORT_EARLY, CLUSTER_MULTIPLIER_SHORT_LATE,
     MARKET_CONSENSUS_WEIGHT,
     STOP_LOSS_NORMAL, STOP_LOSS_CHEAP_ENTRY, STOP_LOSS_CHEAP_THRESHOLD,
     STOP_LOSS_LATE_GAME, STOP_LOSS_Z_MIN, VICTORY_LAP_TIME_HOURS,
@@ -250,7 +252,7 @@ class ProductionStrategy(BaseStrategy):
             else:
                 # Check entry conditions (lines 824-869)
                 entry_signal = self._check_entry_conditions(
-                    bucket, market_state, my_buckets, pred_mean, decayed_std, z_score, fair
+                    bucket, market_state, my_buckets, my_buckets_ids, pred_mean, decayed_std, z_score, fair
                 )
                 if entry_signal:
                     signals.append(entry_signal)
@@ -269,6 +271,7 @@ class ProductionStrategy(BaseStrategy):
         bucket: Dict,
         market_state: MarketState,
         my_buckets: List[float],
+        my_buckets_ids: List[str],
         pred_mean: float,
         decayed_std: float,
         z_score: float,
@@ -276,6 +279,7 @@ class ProductionStrategy(BaseStrategy):
     ) -> Signal:
         """
         EXACT entry logic from production (lines 824-869)
+        + FIX 2: Dynamic clustering for short events
         """
         ask = bucket.get('ask', 0)
         bucket_headroom = bucket['max'] - market_state.count
@@ -303,16 +307,63 @@ class ProductionStrategy(BaseStrategy):
             # CAMBIO #10: Dynamic Min Edge
             dynamic_min_edge = self.min_edge + (decayed_std * 0.01)
             if edge > dynamic_min_edge:
-                return Signal(
-                    type=SignalType.BUY,
-                    market_title=market_state.title,
-                    bucket=bucket['bucket'],
-                    price=ask,
-                    confidence=min(edge * 2, 1.0),
-                    reason=f"Val+{edge:.2f}",
-                    metadata={"z_score": z_score, "fair": fair},
-                    strategy_tag="STANDARD"  # Normal accumulation trade
-                )
+                # FIX 2: Dynamic clustering for short events
+                passes_clustering = True
+                if self.enable_clustering and my_buckets_ids:
+                    # Detect event type and calculate dynamic cluster range
+                    event_type, bucket_size_detected = detect_event_type(
+                        market_state.metadata, 
+                        market_state.buckets
+                    )
+
+                    if event_type == 'short':
+                        # SHORT EVENTS: Use dynamic clustering based on time
+                        if hours_left > 24:
+                            multiplier = CLUSTER_MULTIPLIER_SHORT_EARLY  # 1.5x buckets
+                        else:
+                            multiplier = CLUSTER_MULTIPLIER_SHORT_LATE   # 1.0x buckets
+
+                        # Use detected bucket size or default
+                        avg_bucket_size = bucket_size_detected if bucket_size_detected else 24
+                        cluster_range = avg_bucket_size * multiplier
+                    else:
+                        # LONG EVENTS: Use fixed cluster range (already works well)
+                        cluster_range = self.cluster_range
+
+                    # Check distance to existing positions
+                    try:
+                        if "+" in bucket['bucket']:
+                            new_min = int(bucket['bucket'].replace("+", ""))
+                        else:
+                            new_min = int(bucket['bucket'].split("-")[0])
+
+                        for owned_bucket in my_buckets_ids:
+                            try:
+                                if "+" in owned_bucket:
+                                    owned_min = int(owned_bucket.replace("+", ""))
+                                else:
+                                    owned_min = int(owned_bucket.split("-")[0])
+
+                                distance = abs(new_min - owned_min)
+                                if distance > cluster_range:
+                                    passes_clustering = False
+                                    break
+                            except:
+                                pass
+                    except:
+                        pass
+
+                if passes_clustering:
+                    return Signal(
+                        type=SignalType.BUY,
+                        market_title=market_state.title,
+                        bucket=bucket['bucket'],
+                        price=ask,
+                        confidence=min(edge * 2, 1.0),
+                        reason=f"Val+{edge:.2f}",
+                        metadata={"z_score": z_score, "fair": fair},
+                        strategy_tag="STANDARD"  # Normal accumulation trade
+                    )
 
         return None
 

@@ -16,7 +16,16 @@ MIN_BET = 5.0
 
 # Clustering
 ENABLE_CLUSTERING = True
-CLUSTER_RANGE = 40
+
+# Maximum distance between positions in same market (tweet count units)
+# For long events (≥72h): Use fixed value
+CLUSTER_RANGE = 40  # Positions must be within 40 tweets of each other
+
+# For short events (<72h): Use dynamic clustering based on bucket size and time remaining
+# Bucket sizes: ~24 tweets for short events, ~19 for long events
+# Multipliers by time remaining (short events only):
+CLUSTER_MULTIPLIER_SHORT_EARLY = 1.5   # >24h remaining: Allow 1.5 buckets apart (36 tweets)
+CLUSTER_MULTIPLIER_SHORT_LATE = 1.0    # ≤24h remaining: Allow 1.0 buckets apart (24 tweets, neighbors only)
 
 # Market Consensus Weight (NOT USED IN CURRENT PRODUCTION - line 605 uses 0.2)
 MARKET_WEIGHT = 0.70  # Defined but not used in final mean calculation
@@ -79,3 +88,44 @@ STOP_LOSS_Z_MIN = 1.3
 
 # Victory lap time threshold
 VICTORY_LAP_TIME_HOURS = 48.0
+
+# ==============================================================================
+# AUTO-HEDGE PARAMETERS
+# ==============================================================================
+
+# Only activate hedge in final hours
+HEDGE_MAX_TIME_HOURS = 12.0  # Last 12 hours (for long events ≥72h)
+HEDGE_MIN_TIME_HOURS = 0.5   # But not in final 30 minutes
+
+# For short events (<72h): More conservative activation
+HEDGE_MAX_TIME_HOURS_SHORT = 6.0  # Last 6 hours only (not 12h - too early for short events)
+
+# Price filters for hedge positions (must be cheap insurance)
+HEDGE_MIN_PRICE = 0.005
+HEDGE_MAX_PRICE = 0.30  # Don't pay more than $0.30 for insurance
+
+# Projection rates for hedge scenarios (LONG EVENTS ≥72h ONLY)
+HEDGE_FLOOR_RATE = 1.0    # Pessimistic: 1 tweet/hour (slow day)
+HEDGE_CEILING_RATE = 3.5  # Optimistic: 3.5 tweets/hour (rage mode)
+
+# For SHORT EVENTS (<72h): Use adaptive rates based on current_rate
+# Instead of fixed rates, calculate: current_rate × multiplier (with caps)
+# This adapts to the event's actual pace instead of assuming fixed projections
+HEDGE_CEILING_MULTIPLIER_SHORT = 1.3  # Optimistic: 1.3× current rate
+HEDGE_FLOOR_MULTIPLIER_SHORT = 0.7    # Pessimistic: 0.7× current rate
+HEDGE_CEILING_CAP_SHORT = 2.5         # Max ceiling: 2.5 tweets/hour
+HEDGE_FLOOR_CAP_SHORT = 0.5           # Min floor: 0.5 tweets/hour
+
+# Event type detection threshold (based on bucket size analysis)
+# Short events (~24 tweets/bucket), Long events (~19 tweets/bucket)
+EVENT_TYPE_BUCKET_THRESHOLD = 21.5  # Short if > 21.5, Long if ≤ 21.5
+
+# For short events (<72h): Use adaptive rates based on current rhythm
+# These are multipliers applied to current rate, with caps
+HEDGE_CEILING_MULTIPLIER_SHORT = 1.3  # Max 30% faster than current rate
+HEDGE_FLOOR_MULTIPLIER_SHORT = 0.7    # Max 30% slower than current rate
+HEDGE_CEILING_CAP_SHORT = 2.5         # Absolute max: 2.5 tweets/hour
+HEDGE_FLOOR_CAP_SHORT = 0.5           # Absolute min: 0.5 tweets/hour
+
+# Bucket detection threshold (for event type classification)
+EVENT_TYPE_BUCKET_THRESHOLD = 21.5  # Midpoint between 19 and 24

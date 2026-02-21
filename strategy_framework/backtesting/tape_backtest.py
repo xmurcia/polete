@@ -113,7 +113,8 @@ class TapeBacktest:
             hours_left=market_meta['hours'],
             daily_avg=market_meta['daily_avg'],
             buckets=buckets,
-            timestamp=tape['timestamp']
+            timestamp=tape['timestamp'],
+            metadata=market_meta  # Pass full metadata for event type detection
         )
 
     def run(

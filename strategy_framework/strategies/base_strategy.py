@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 from datetime import datetime
 from enum import Enum
@@ -19,6 +19,7 @@ class MarketState:
     daily_avg: float        # Historical daily average
     buckets: List[Dict]     # List of {bucket, min, max, ask, bid}
     timestamp: float
+    metadata: Optional[Dict] = field(default=None)  # Optional: Additional market metadata (for event type detection)
 
 @dataclass
 class Signal:

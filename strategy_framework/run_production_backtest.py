@@ -40,7 +40,7 @@ strategy = ProductionStrategy()
 backtester = TapeBacktest(
     strategy=strategy,
     initial_capital=1000.0,
-    tape_dir="./polete-volume-2/market_tape"
+    tape_dir="../polete-volume-2/market_tape"
 )
 
 # Run backtest

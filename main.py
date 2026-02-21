@@ -22,7 +22,7 @@ from src.paper_trader import PaperTrader
 from src.market_panic_sensor import MarketPanicSensor
 from src.moonshot import ejecutar_moonshot_satelite
 from src.auto_hedge import gestionar_cobertura_final
-from src.utils import save_market_tape, save_trade_snapshot, titles_match_paranoid, get_bio_multiplier
+from src.utils import save_market_tape, save_trade_snapshot, titles_match_paranoid, get_bio_multiplier, detect_event_type
 
 # Asegurar que existen los directorios necesarios
 if not os.path.exists(SNAPSHOTS_DIR): os.makedirs(SNAPSHOTS_DIR)
@@ -445,9 +445,53 @@ def run():
                                     edge = fair - ask
                                     dynamic_min_edge = MIN_EDGE_BASE + (decayed_std * EDGE_STD_MULTIPLIER)
                                     if edge > dynamic_min_edge:
-                                        action = "BUY"; reason = f"Val+{edge:.2f}"
-                                        res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
-                                        if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
+                                        # FIX 2: Dynamic clustering for short events
+                                        passes_clustering = True
+                                        if ENABLE_CLUSTERING and my_buckets_ids:
+                                            # Detect event type and calculate dynamic cluster range
+                                            event_type, bucket_size_detected = detect_event_type(m_poly, m_clob['buckets'])
+
+                                            if event_type == 'short':
+                                                # SHORT EVENTS: Use dynamic clustering based on time
+                                                if hours_left > 24:
+                                                    multiplier = CLUSTER_MULTIPLIER_SHORT_EARLY  # 1.5x buckets
+                                                else:
+                                                    multiplier = CLUSTER_MULTIPLIER_SHORT_LATE   # 1.0x buckets
+
+                                                # Use detected bucket size or default
+                                                avg_bucket_size = bucket_size_detected if bucket_size_detected else 24
+                                                cluster_range = avg_bucket_size * multiplier
+                                            else:
+                                                # LONG EVENTS: Use fixed cluster range (already works well)
+                                                cluster_range = CLUSTER_RANGE
+
+                                            # Check distance to existing positions
+                                            try:
+                                                if "+" in b['bucket']:
+                                                    new_min = int(b['bucket'].replace("+", ""))
+                                                else:
+                                                    new_min = int(b['bucket'].split("-")[0])
+
+                                                for owned_bucket in my_buckets_ids:
+                                                    try:
+                                                        if "+" in owned_bucket:
+                                                            owned_min = int(owned_bucket.replace("+", ""))
+                                                        else:
+                                                            owned_min = int(owned_bucket.split("-")[0])
+
+                                                        distance = abs(new_min - owned_min)
+                                                        if distance > cluster_range:
+                                                            passes_clustering = False
+                                                            break
+                                                    except:
+                                                        pass
+                                            except:
+                                                pass
+
+                                        if passes_clustering:
+                                            action = "BUY"; reason = f"Val+{edge:.2f}"
+                                            res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
+                                            if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
 
                         color_act = f"🟢 {action}" if "BUY" in action else (f"🔴 {action}" if "ROTATE" in action or "PROFIT" in action else "-")
                         bucket_display = f"*{b['bucket']}" if owned else f"{b['bucket']}"
