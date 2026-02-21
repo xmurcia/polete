@@ -615,18 +615,58 @@ def run():
                             except RuntimeError:
                                 balance = asyncio.run(trader.balance_mgr.get_available_balance())
                         else:
-                            # Paper mode: Use portfolio dict
+                            # Paper mode: Use portfolio dict + live prices from clob_data
                             portfolio = trader.get_portfolio()
                             positions_list = []
 
                             for pos_id, pos_data in portfolio.get('positions', {}).items():
+                                entry_price = pos_data.get('entry_price', 0)
+                                bucket_label = pos_data.get('bucket', '')
+                                market_title = pos_data.get('market', '')
+                                shares = pos_data.get('shares', 0)
+
+                                # Intentar resolver precio actual desde clob_data (fuente: clob)
+                                live_price = 0.0
+                                price_source = 'caché'  # etiqueta de fuente por defecto
+
+                                if clob_data:
+                                    for clob_mkt in clob_data:
+                                        if titles_match_paranoid(market_title, clob_mkt['title']):
+                                            for b in clob_mkt.get('buckets', []):
+                                                if str(b['bucket']) == str(bucket_label):
+                                                    # bid = mejor precio de compra (lo que el mercado paga)
+                                                    live_price = b.get('bid', 0.0)
+                                                    price_source = 'clob'
+                                                    break
+                                            break
+
+                                # Fallback a precio de entrada si la API no devolvió dato válido
+                                if live_price == 0.0:
+                                    live_price = entry_price
+                                    price_source = 'caché'
+
+                                # P&L no realizado calculado con precio en vivo [FUENTE: calculado]
+                                invested = shares * entry_price
+                                unrealized_pnl = (live_price - entry_price) * shares
+
+                                # Log de trazabilidad con etiqueta de fuente
+                                print(
+                                    f"[PAPER][FUENTE: {price_source}] "
+                                    f"{market_title[:25]} | {bucket_label} "
+                                    f"| Entrada={entry_price:.3f} "
+                                    f"| Actual={live_price:.3f} [FUENTE: {price_source}] "
+                                    f"| Valor=${invested:.2f} [FUENTE: calculado] "
+                                    f"| P&L=${unrealized_pnl:+.2f} [FUENTE: calculado]"
+                                )
+
                                 positions_list.append({
-                                    'event_slug': pos_data.get('market', ''),
-                                    'range_label': pos_data.get('bucket', ''),
-                                    'size': pos_data.get('shares', 0),
-                                    'avg_entry_price': pos_data.get('entry_price', 0),
-                                    'current_price': pos_data.get('current_price', 0),
-                                    'unrealized_pnl': 0  # TODO: Calculate from current price
+                                    'event_slug': market_title,
+                                    'range_label': bucket_label,
+                                    'size': shares,
+                                    'avg_entry_price': entry_price,   # [FUENTE: caché portfolio.json]
+                                    'current_price': live_price,      # [FUENTE: clob | caché]
+                                    'unrealized_pnl': unrealized_pnl, # [FUENTE: calculado]
+                                    'price_source': price_source       # etiqueta para la notificación
                                 })
 
                             balance = portfolio.get('cash', 0)
