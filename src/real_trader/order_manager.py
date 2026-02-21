@@ -77,19 +77,12 @@ class OrderManager:
         try:
             print(f"[OrderManager] Placing {request.order_type} {request.side} order: {request.range_label}")
 
-            # Adjust price for FOK BUY orders (add slippage buffer)
+            # Use price and size directly - FOK orders execute at best available price
             price = request.price
-            if request.order_type == OrderType.FOK and request.side == Side.BUY:
-                slippage_buffer = price * 0.02
-                price = price + slippage_buffer
-                print(f"[OrderManager] FOK BUY: Added +2% slippage → {price*100:.2f}¢")
+            size = request.size
 
             # Enforce minimum price
             price = max(price, 0.001)
-
-            # Don't round here - let py_clob_client SDK handle all rounding
-            # The SDK's builder.py already implements the correct logic
-            size = request.size
 
             print(f"[OrderManager] Sending to SDK: price={price}, size={size}")
 
