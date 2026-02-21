@@ -87,20 +87,26 @@ class OrderManager:
             # Enforce minimum price
             price = max(price, 0.001)
 
-            # Round price to 2 decimals (maker amount requirement)
-            # Use Decimal to ensure exact precision
+            # Round price to 2 decimals
             from decimal import Decimal, ROUND_DOWN
             price = float(Decimal(str(price)).quantize(Decimal('0.01'), rounding=ROUND_DOWN))
 
-            # Round size according to Polymarket requirements:
-            # - BUY orders (taker amount): max 5 decimals
-            # - SELL orders (maker amount): max 2 decimals
+            # For market orders (FOK):
+            # - maker_amount = price × size (must have max 2 decimals for BUY)
+            # - taker_amount = size (must have max 5 decimals)
+            # We need to adjust size so that price × size has exactly 2 decimals
             if request.side == Side.BUY:
-                size = float(Decimal(str(request.size)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
+                # Calculate maker_amount and round to 2 decimals
+                maker_amount = float(Decimal(str(price * request.size)).quantize(Decimal('0.01'), rounding=ROUND_DOWN))
+                # Recalculate size from rounded maker_amount
+                size = maker_amount / price if price > 0 else 0
+                print(f"[OrderManager] BUY: maker_amount=${maker_amount:.2f}, size={size:.5f}")
             else:  # SELL
+                # For SELL, size is the maker amount
                 size = float(Decimal(str(request.size)).quantize(Decimal('0.01'), rounding=ROUND_DOWN))
+                print(f"[OrderManager] SELL: size={size:.2f}")
 
-            print(f"[OrderManager] Final values: price={price} (2 dec), size={size} (exact)")
+            print(f"[OrderManager] Final: price={price:.2f}, size={size}, price×size={price*size:.6f}")
 
             # Create and post order
             order_args = OrderArgs(
