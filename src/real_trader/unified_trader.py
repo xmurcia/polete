@@ -314,7 +314,7 @@ class UnifiedTrader:
                         balance=cash_after,
                         invested=total_invested,
                         strategy=strategy_tag,
-                        mode="REAL"
+                        mode="REAL" if self.use_real else "PAPER"
                     )
 
                 print(f"[UnifiedTrader] ✅ BUY: ${bet_amount:.2f} ({shares:.2f} shares) - Order {result.order_id}")
@@ -420,7 +420,7 @@ class UnifiedTrader:
                         pnl_pct=(profit / cost) * 100 if cost > 0 else 0.0,
                         balance=cash_after,
                         reason=reason,
-                        mode="REAL",
+                        mode="REAL" if self.use_real else "PAPER",
                         entry_price=position.avg_entry_price,
                         strategy=strategy_tag
                     )
