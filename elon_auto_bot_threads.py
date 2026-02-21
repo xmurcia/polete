@@ -894,7 +894,7 @@ def run():
                                         pos_data['max_price_seen'] = bid
                                         current_max = bid
                                         trader._save()
-                                    
+
                                     if current_max >= 0.50:
                                         drawdown_from_peak = current_max - bid
                                         if drawdown_from_peak >= 0.15:
@@ -982,18 +982,28 @@ def run():
                             volatility_buffer = int(decayed_std * 1.5)
                             buy_safety = base_threshold + volatility_buffer
 
-                            if bucket_headroom < buy_safety: continue
-                            
+                            if bucket_headroom < buy_safety:
+                                print(f"[BUY_DEBUG] {b['bucket']}: ❌ headroom={bucket_headroom} < buy_safety={buy_safety} (base={base_threshold}+vol={volatility_buffer})")
+                                continue
+
                             is_impossible = False
                             if m_poly['hours'] < 1.0:
                                 tweets_needed = b['min'] - m_poly['count']
-                                if tweets_needed > (m_poly['hours'] * 15): is_impossible = True
+                                if tweets_needed > (m_poly['hours'] * 15):
+                                    is_impossible = True
+                                    print(f"[BUY_DEBUG] {b['bucket']}: ❌ impossible (need {tweets_needed} tweets in {m_poly['hours']:.1f}h)")
 
                             if not is_impossible:
-                                if z_score <= MAX_Z_SCORE_ENTRY and ask >= MIN_PRICE_ENTRY:
+                                if z_score > MAX_Z_SCORE_ENTRY:
+                                    print(f"[BUY_DEBUG] {b['bucket']}: ❌ z_score={z_score:.2f} > MAX={MAX_Z_SCORE_ENTRY} (mean={final_mean:.1f}, std={decayed_std:.1f})")
+                                elif ask < MIN_PRICE_ENTRY:
+                                    print(f"[BUY_DEBUG] {b['bucket']}: ❌ ask={ask:.4f} < MIN={MIN_PRICE_ENTRY}")
+                                else:
                                     edge = fair - ask
                                     dynamic_min_edge = 0.05 + (decayed_std * 0.01)
-                                    if edge > dynamic_min_edge:
+                                    if edge <= dynamic_min_edge:
+                                        print(f"[BUY_DEBUG] {b['bucket']}: ❌ edge={edge:.4f} <= min_edge={dynamic_min_edge:.4f} (fair={fair:.4f}, ask={ask:.4f}, std={decayed_std:.1f})")
+                                    else:
                                         action = "BUY"; reason = f"Val+{edge:.2f}"
                                         res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
                                         if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
