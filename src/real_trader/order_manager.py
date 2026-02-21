@@ -97,10 +97,12 @@ class OrderManager:
             # - SELL: maker_amount = price × size (USDC received, max 2 decimals)
             #         taker_amount = size (shares sold, max 5 decimals)
             if request.side == Side.BUY:
-                # Round size (shares received) to 2 decimals
-                size = float(Decimal(str(request.size)).quantize(Decimal('0.01'), rounding=ROUND_DOWN))
-                taker_amount = price * size
-                print(f"[OrderManager] BUY: size={size:.2f} shares, taker_amount=${taker_amount:.5f} USDC")
+                # Calculate taker_amount (USDC spent) and round to 5 decimals
+                taker_amount = float(Decimal(str(price * request.size)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
+                # Recalculate size (shares received) from rounded taker_amount and round to 2 decimals
+                size_calc = taker_amount / price if price > 0 else 0
+                size = float(Decimal(str(size_calc)).quantize(Decimal('0.01'), rounding=ROUND_DOWN))
+                print(f"[OrderManager] BUY: taker_amount=${taker_amount:.5f} USDC, size={size:.2f} shares")
             else:  # SELL
                 # Round size (shares sold) to 5 decimals first
                 size = float(Decimal(str(request.size)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
