@@ -86,7 +86,14 @@ class OrderManager:
 
             # Enforce minimum price
             price = max(price, 0.001)
-            size = request.size
+
+            # Round size according to Polymarket requirements:
+            # - BUY orders (taker amount): max 5 decimals
+            # - SELL orders (maker amount): max 2 decimals
+            if request.side == Side.BUY:
+                size = round(request.size, 5)
+            else:  # SELL
+                size = round(request.size, 2)
 
             # Create and post order
             order_args = OrderArgs(
