@@ -97,12 +97,24 @@ class OrderManager:
             # - SELL: maker_amount = price × size (USDC received, max 2 decimals)
             #         taker_amount = size (shares sold, max 5 decimals)
             if request.side == Side.BUY:
-                # Calculate taker_amount (USDC spent) and round to 5 decimals
-                taker_amount = float(Decimal(str(price * request.size)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
-                # Recalculate size (shares received) from rounded taker_amount and round to 2 decimals
-                size_calc = taker_amount / price if price > 0 else 0
-                size = float(Decimal(str(size_calc)).quantize(Decimal('0.01'), rounding=ROUND_DOWN))
-                print(f"[OrderManager] BUY: taker_amount=${taker_amount:.5f} USDC, size={size:.2f} shares")
+                # Use Decimal arithmetic exclusively to avoid float precision issues
+                price_dec = Decimal(str(price))
+                size_dec = Decimal(str(request.size))
+
+                # Round size to 2 decimals (maker_amount requirement)
+                size_dec = size_dec.quantize(Decimal('0.01'), rounding=ROUND_DOWN)
+
+                # Calculate taker_amount with exact precision
+                taker_amount_dec = price_dec * size_dec
+
+                # Round taker_amount to 5 decimals
+                taker_amount_dec = taker_amount_dec.quantize(Decimal('0.00001'), rounding=ROUND_DOWN)
+
+                # Convert back to float for OrderArgs
+                size = float(size_dec)
+                taker_amount = float(taker_amount_dec)
+
+                print(f"[OrderManager] BUY: size={size} shares, taker_amount=${taker_amount} USDC (price×size={price*size})")
             else:  # SELL
                 # Round size (shares sold) to 5 decimals first
                 size = float(Decimal(str(request.size)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
