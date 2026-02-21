@@ -106,9 +106,10 @@ class OrderManager:
                 size = float(Decimal(str(request.size)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
                 # Then ensure maker_amount (USDC received) has max 2 decimals
                 maker_amount = float(Decimal(str(price * size)).quantize(Decimal('0.01'), rounding=ROUND_DOWN))
-                # Recalculate size from rounded maker_amount
-                size = maker_amount / price if price > 0 else 0
-                print(f"[OrderManager] SELL: size={size:.2f} shares, maker_amount=${maker_amount:.2f} USDC")
+                # Recalculate size from rounded maker_amount and round to 5 decimals
+                size_calc = maker_amount / price if price > 0 else 0
+                size = float(Decimal(str(size_calc)).quantize(Decimal('0.00001'), rounding=ROUND_DOWN))
+                print(f"[OrderManager] SELL: size={size:.5f} shares, maker_amount=${maker_amount:.2f} USDC")
 
             print(f"[OrderManager] Final: price={price:.2f}, size={size}, price×size={price*size:.6f}")
 
