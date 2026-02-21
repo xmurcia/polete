@@ -166,6 +166,16 @@ def run():
                 if time.time() - last_tape > MARKET_TAPE_SAVE_INTERVAL_SECONDS:
                     save_market_tape(clob_data, markets); last_tape = time.time()
 
+                # Prefetch token_ids for real mode (eliminates per-trade Gamma API latency)
+                if hasattr(trader, 'use_real') and trader.use_real:
+                    buckets_by_market = {}
+                    for m_poly in markets:
+                        m_clob = next((c for c in clob_data if titles_match_paranoid(m_poly['title'], c['title'])), None)
+                        if m_clob:
+                            buckets_by_market[m_poly['title']] = [b['bucket'] for b in m_clob['buckets']]
+                    if buckets_by_market:
+                        trader.prefetch_token_ids(buckets_by_market)
+
                 # Panic
                 alerts = panic_sensor.analyze(clob_data)
                 for a in alerts:

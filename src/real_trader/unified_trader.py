@@ -61,8 +61,11 @@ class UnifiedTrader:
         self.trade_log_path = os.path.join(self.logs_dir, "trade_history.csv")
         self._ensure_log_header()
 
-        # Token metadata cache: token_id → (market_title, bucket)
+        # Token metadata cache: token_id → (market_title, bucket)  [reverse: for display]
         self._token_metadata = {}
+
+        # Forward token_id cache: "market_title|bucket" → token_id  [for fast BUY resolution]
+        self._token_id_forward_cache: Dict[str, str] = {}
 
         # Position sync cache to avoid excessive API calls
         self._last_position_sync = 0  # timestamp
@@ -428,6 +431,104 @@ class UnifiedTrader:
 
         return None
 
+    def prefetch_token_ids(self, buckets_by_market: Dict[str, list]) -> None:
+        """
+        Pre-resolve token_ids for all given (market, bucket) pairs in a single
+        Gamma API call. Only fetches if there are pairs missing from cache.
+
+        Args:
+            buckets_by_market: {market_title: [bucket1, bucket2, ...]}
+        """
+        import requests
+        import json
+        import re
+
+        # 1. Identify which pairs are not yet in cache
+        missing: Dict[str, list] = {}
+        for market_title, buckets in buckets_by_market.items():
+            for bucket in buckets:
+                if f"{market_title}|{bucket}" not in self._token_id_forward_cache:
+                    missing.setdefault(market_title, []).append(bucket)
+
+        if not missing:
+            return  # Full cache hit — no HTTP call needed
+
+        # 2. Single Gamma API call (same endpoint as _resolve_token_id)
+        try:
+            response = requests.get(
+                "https://gamma-api.polymarket.com/events",
+                params={
+                    "limit": 100,
+                    "active": "true",
+                    "closed": "false",
+                    "archived": "false",
+                    "order": "volume24hr",
+                    "ascending": "false"
+                },
+                timeout=10
+            )
+            if response.status_code != 200:
+                print(f"[UnifiedTrader] ⚠️  Prefetch API error: {response.status_code}")
+                return
+            events = response.json()
+        except Exception as e:
+            print(f"[UnifiedTrader] ⚠️  Prefetch failed: {e}")
+            return
+
+        # 3. Same matching logic as _resolve_token_id — reused locally
+        def titles_match(t1, t2):
+            t1, t2 = t1.lower(), t2.lower()
+            if t1 in t2 or t2 in t1:
+                return True
+            def get_nums(txt):
+                return {n for n in re.findall(r'\d+', txt) if n not in ['2024', '2025', '2026']}
+            return len(get_nums(t1).intersection(get_nums(t2))) >= 2
+
+        resolved_count = 0
+        total_missing = sum(len(v) for v in missing.values())
+
+        for market_title, buckets_needed in missing.items():
+            # Find matching event
+            target_event = None
+            for event in events:
+                event_title = event.get("title", "")
+                if "elon" not in event_title.lower() or "tweets" not in event_title.lower():
+                    continue
+                if titles_match(market_title, event_title):
+                    target_event = event
+                    break
+
+            if not target_event:
+                continue
+
+            markets_in_event = target_event.get("markets", [])
+
+            for bucket in buckets_needed:
+                bucket_parts = bucket.split("-")
+                bucket_min = bucket_parts[0] if len(bucket_parts) > 0 else ""
+                bucket_max = bucket_parts[1] if len(bucket_parts) > 1 else ""
+
+                for market in markets_in_event:
+                    question = market.get("question", "").lower()
+                    match_found = (
+                        bucket.lower() in question or
+                        bucket.replace("-", " - ").lower() in question or
+                        f"{bucket_min} to {bucket_max}".lower() in question or
+                        (bucket_min in question and bucket_max in question)
+                    )
+                    if match_found:
+                        clob_token_ids = market.get("clobTokenIds", [])
+                        if isinstance(clob_token_ids, str):
+                            clob_token_ids = json.loads(clob_token_ids)
+                        if clob_token_ids:
+                            token_id = str(clob_token_ids[0])  # YES token
+                            cache_key = f"{market_title}|{bucket}"
+                            self._token_id_forward_cache[cache_key] = token_id
+                            resolved_count += 1
+                        break
+
+        print(f"[UnifiedTrader] ⚡ Prefetch: {resolved_count}/{total_missing} token_ids cached")
+
     async def _resolve_token_id(
         self,
         market_title: str,
@@ -449,6 +550,13 @@ class UnifiedTrader:
         """
         import requests
         import json
+
+        # 0. Check forward cache first (populated by prefetch_token_ids)
+        cache_key = f"{market_title}|{bucket}"
+        if cache_key in self._token_id_forward_cache:
+            token_id = self._token_id_forward_cache[cache_key]
+            print(f"[UnifiedTrader] ⚡ Cache hit: {bucket} → {token_id[:20]}...")
+            return token_id
 
         try:
             # 1. Search for event in Gamma API
@@ -559,8 +667,10 @@ class UnifiedTrader:
                         token_index = 0 if side == "YES" else 1
                         token_id = clob_token_ids[token_index] if len(clob_token_ids) > token_index else clob_token_ids[0]
 
+                        token_id = str(token_id)
+                        self._token_id_forward_cache[f"{market_title}|{bucket}"] = token_id
                         print(f"[UnifiedTrader] ✅ Resolved token: {bucket} → {token_id[:20]}...")
-                        return str(token_id)
+                        return token_id
 
             # Debug: show available markets
             print(f"[UnifiedTrader] ⚠️  Bucket not found: {bucket}")
