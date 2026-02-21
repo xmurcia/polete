@@ -77,14 +77,16 @@ class OrderManager:
         try:
             print(f"[OrderManager] Placing {request.order_type} {request.side} order: {request.range_label}")
 
-            # Use price and size directly - FOK orders execute at best available price
-            price = request.price
-            size = request.size
-
-            # Enforce minimum price
+            # Round price to 3 decimals (tick size 0.001)
+            price = round(request.price, 3)
             price = max(price, 0.001)
 
-            print(f"[OrderManager] Sending to SDK: price={price}, size={size}")
+            # Calculate size such that price × size is a multiple of 0.01
+            # This ensures maker_amount has exactly 2 decimals
+            target_amount = round(price * request.size, 2)  # Round to cents
+            size = round(target_amount / price, 2)  # Recalculate size
+
+            print(f"[OrderManager] Final: price={price}, size={size}, amount={target_amount}")
 
             # Create and post order
             order_args = OrderArgs(
