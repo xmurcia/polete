@@ -81,11 +81,14 @@ class OrderManager:
             price = request.price
             if request.order_type == OrderType.FOK and request.side == Side.BUY:
                 slippage_buffer = price * 0.02
-                price = round((price + slippage_buffer) * 100) / 100
+                price = price + slippage_buffer
                 print(f"[OrderManager] FOK BUY: Added +2% slippage → {price*100:.2f}¢")
 
             # Enforce minimum price
             price = max(price, 0.001)
+
+            # Round price to 2 decimals (maker amount requirement)
+            price = round(price, 2)
 
             # Round size according to Polymarket requirements:
             # - BUY orders (taker amount): max 5 decimals
@@ -94,6 +97,8 @@ class OrderManager:
                 size = round(request.size, 5)
             else:  # SELL
                 size = round(request.size, 2)
+
+            print(f"[OrderManager] Final values: price={price:.3f} (2 dec), size={size:.5f}")
 
             # Create and post order
             order_args = OrderArgs(
