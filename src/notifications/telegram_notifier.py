@@ -280,31 +280,26 @@ class TelegramNotifier:
         # --- Construir mensaje por bloques ---
         lines = [f"{emoji_mode} <b>PORTFOLIO — {mode}</b>"]
 
-        for event_name, event_positions in events.items():
+        event_list = list(events.items())
+        for idx_evt, (event_name, event_positions) in enumerate(event_list):
             # Cabecera del evento
             lines.append(f"\n🗓 <b>{event_name}</b>")
 
-            # Tabla monoespaciada con una fila por ticket
-            # Columnas: Ticket | Entr | Act | Valor | P&L$ | P&L%
-            COL = "─" * 52
-            header = f"{'Ticket':<10} {'Entr':>5} {'Act':>5} {'Valor':>7} {'P&L $':>7} {'P&L%':>6}"
-            rows = [COL, header, COL]
-
-            for pos in event_positions:
+            for idx_pos, pos in enumerate(event_positions):
                 bucket    = pos.get('range_label', 'N/A')
                 entry     = pos.get('avg_entry_price', 0)
                 current   = pos.get('current_price', 0)
                 size      = pos.get('size', 0)
-                invested  = size * entry                    # [FUENTE: calculado]
-                source    = pos.get('price_source', 'caché')  # etiqueta de fuente
+                invested  = size * entry
+                source    = pos.get('price_source', 'caché')
 
                 pnl_dollar = pos.get('unrealized_pnl', 0)
                 if pnl_dollar == 0 and current > 0:
-                    pnl_dollar = (current - entry) * size  # [FUENTE: calculado]
+                    pnl_dollar = (current - entry) * size
 
                 pnl_pct = (pnl_dollar / invested * 100) if invested > 0 else 0.0
-                # Signo explícito para P&L en dólares (+ / -)
-                pnl_sign_d = "+" if pnl_dollar >= 0 else "-"
+                pnl_sign = "+" if pnl_dollar >= 0 else "-"
+                pnl_emoji = "📈" if pnl_dollar >= 0 else "📉"
 
                 # Log en consola con etiqueta de fuente para trazabilidad
                 print(
@@ -313,21 +308,19 @@ class TelegramNotifier:
                     f"Entrada={entry:.3f} "
                     f"Actual={current:.3f} "
                     f"Valor=${invested:.2f} "
-                    f"P&L={pnl_sign_d}${abs(pnl_dollar):.2f} ({pnl_pct:+.1f}%)"
+                    f"P&L={pnl_sign}${abs(pnl_dollar):.2f} ({pnl_pct:+.1f}%)"
                 )
 
-                row = (
-                    f"{bucket:<10} "
-                    f"{entry*100:>4.0f}¢ "
-                    f"{current*100:>4.0f}¢ "
-                    f"${invested:>6.2f} "
-                    f"{pnl_sign_d}${abs(pnl_dollar):>4.2f} "
-                    f"{pnl_pct:>+5.1f}%"
+                lines.append(
+                    f"\n📦 <b>{bucket}</b>\n"
+                    f"  Entrada: {entry*100:.0f}¢  →  Actual: {current*100:.0f}¢  <i>[{source}]</i>\n"
+                    f"  Valor invertido: ${invested:.2f}\n"
+                    f"  {pnl_emoji} P&amp;L: {pnl_sign}${abs(pnl_dollar):.2f}  ({pnl_pct:+.1f}%)"
                 )
-                rows.append(row)
 
-            rows.append(COL)
-            lines.append(f"<pre>{chr(10).join(rows)}</pre>")
+            # Separador entre eventos (no al final del último)
+            if idx_evt < len(event_list) - 1:
+                lines.append("\n━━━━━━━━━━━━━━━━")
 
         # --- Totales del portfolio ---
         total_equity = balance + total_invested + total_pnl
