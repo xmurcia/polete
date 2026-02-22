@@ -24,6 +24,12 @@ except ImportError:
     # Fallback if not found
     TelegramNotifier = None
 
+# Import error logger
+try:
+    from src.utils.error_logger import get_error_logger
+except ImportError:
+    get_error_logger = None
+
 try:
     from .auth import PolyAuth
     from .balance_manager import BalanceManager
@@ -79,6 +85,8 @@ class UnifiedTrader:
             self.position_tracker = PositionTracker(self.auth)
             # Setup Telegram notifications (ONLY in real mode)
             self.telegram = TelegramNotifier() if TelegramNotifier else None
+            # Setup error logger
+            self.error_logger = get_error_logger() if get_error_logger else None
             self._paper_trader = None
         else:
             print("[UnifiedTrader] 📄 PAPER TRADING MODE - Simulation only")
@@ -88,6 +96,7 @@ class UnifiedTrader:
             self.order_mgr = None
             self.position_tracker = None
             self.telegram = None  # No Telegram in paper mode
+            self.error_logger = None  # No error logging in paper mode
 
     def initialize(self):
         """Initialize trader (sync wrapper)"""
@@ -199,8 +208,7 @@ class UnifiedTrader:
             if not token_id:
                 error_msg = f"Could not resolve token_id for {market_title} {bucket}"
                 print(f"[UnifiedTrader] ❌ {error_msg}")
-                if self.telegram and self.use_real:
-                    self.telegram.notify_error(error_msg, context=f"BUY signal for {bucket}")
+                self._log_error(error_msg, context=f"BUY signal for {bucket}")
                 return None
 
             # 1. Sync positions and check if position already exists BY TOKEN_ID
@@ -243,6 +251,8 @@ class UnifiedTrader:
             if bet_amount > available:
                 error_msg = f"Insufficient balance: need ${bet_amount:.2f}, have ${available:.2f}"
                 print(f"[UnifiedTrader] ❌ {error_msg}")
+                if self.error_logger:
+                    self.error_logger.log_simple(error_msg, level="WARNING")
                 if self.telegram and self.use_real:
                     self.telegram.notify_low_balance(available, bet_amount)
                 return None
@@ -328,6 +338,7 @@ class UnifiedTrader:
                 return f"✅ BUY: ${bet_amount:.2f}"
             else:
                 print(f"[UnifiedTrader] ❌ Order failed: {result.error}")
+                self._log_error(f"BUY order failed: {result.error}", context=f"{market_title} {bucket} @ ${price:.3f}")
                 if self.telegram and self.use_real:
                     self.telegram.notify_order_failed(
                         market=market_title,
@@ -371,8 +382,7 @@ class UnifiedTrader:
                 error_msg = f"No position found for {bucket} in market {market_title}"
                 print(f"[UnifiedTrader] ⚠️  {error_msg}")
                 print(f"[UnifiedTrader] 📋 Available positions: {[(self._token_metadata.get(p.token_id, {}).get('bucket', 'unknown'), p.event_slug) for p in positions]}")
-                if self.telegram and self.use_real:
-                    self.telegram.notify_error(error_msg, context="SELL signal - position not found")
+                self._log_error(error_msg, context="SELL signal - position not found")
                 return None
 
             # 2. Multi-strategy SELL with fallback (FOK@bid → FOK@ask → GTC@bid)
@@ -513,6 +523,7 @@ class UnifiedTrader:
                 return f"💰 SELL: P&L ${profit:.2f}"
             else:
                 print(f"[UnifiedTrader] ❌ Order failed: {result.error}")
+                self._log_error(f"SELL order failed: {result.error}", context=f"{market_title} {bucket} @ ${price:.3f}")
                 if self.telegram and self.use_real:
                     self.telegram.notify_order_failed(
                         market=market_title,
@@ -1018,6 +1029,16 @@ class UnifiedTrader:
 
         # Fallback: return first 12 chars
         return market_title[:12] if len(market_title) > 12 else market_title
+
+    def _log_error(self, error_msg: str, context: str = "", extra_info: dict = None):
+        """Log error to file and send Telegram notification"""
+        # Log to file
+        if self.error_logger and self.use_real:
+            self.error_logger.log_simple(f"{context}: {error_msg}" if context else error_msg)
+
+        # Send Telegram notification
+        if self.telegram and self.use_real:
+            self.telegram.notify_error(error_msg, context=context)
 
     def _ensure_log_header(self):
         """Ensure trade log CSV has header"""
