@@ -68,6 +68,17 @@ class BalanceManager:
             print(f"[BalanceManager] ⚠️  Balance fetch failed: {e}")
             return 0.0
 
+    async def get_conditional_balance(self, token_id: str) -> float:
+        """Get CTF conditional token balance for a specific token"""
+        try:
+            params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
+            response = self.client.get_balance_allowance(params)
+            balance = float(response.get("balance", 0)) / 1e6
+            return balance
+        except Exception as e:
+            print(f"[BalanceManager] ⚠️  CTF balance fetch failed: {e}")
+            return 0.0
+
     async def can_place_order(self, dollar_amount: float) -> bool:
         """Check if order can be placed (sufficient balance)"""
         available = await self.get_available_balance()
