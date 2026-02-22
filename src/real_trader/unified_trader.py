@@ -77,6 +77,12 @@ class UnifiedTrader:
         self._last_position_sync = 0  # timestamp
         self._position_sync_interval = 5  # seconds
 
+        # Pending buy guard: token_id → purchase timestamp
+        # Survives sync_positions() clears; prevents duplicate BUYs while the
+        # Polymarket data API hasn't propagated the new position yet.
+        # Expires after 5 minutes (well past API propagation lag of ~30s).
+        self._pending_buy_token_ids: Dict[str, float] = {}
+
         if use_real:
             print("[UnifiedTrader] 🔴 REAL TRADING MODE - Using real money!")
             self.auth = PolyAuth()
@@ -213,7 +219,21 @@ class UnifiedTrader:
 
             # 1. Sync positions and check if position already exists BY TOKEN_ID
             if self.use_real:
-                # Sync from Polymarket API (cached)
+                # 1a. Fast guard: check pending buys that survived the last API sync
+                # (sync_positions() clears position_tracker, so we keep a separate
+                # registry of recently bought token_ids for up to 5 minutes)
+                import time as _time
+                _now = _time.time()
+                if token_id in self._pending_buy_token_ids:
+                    _age = _now - self._pending_buy_token_ids[token_id]
+                    if _age < 300:  # 5-minute window (well past ~30s API lag)
+                        print(f"[UnifiedTrader] ⚠️  Pending buy exists for {bucket} "
+                              f"({_age:.0f}s ago) — skipping duplicate")
+                        return None
+                    else:
+                        del self._pending_buy_token_ids[token_id]
+
+                # 1b. Sync from Polymarket API (cached) and check live positions
                 await self._sync_positions_cached()
 
                 # Check if position already exists for this token_id
@@ -292,6 +312,11 @@ class UnifiedTrader:
                     market_title=market_title,
                     token_side="YES"
                 )
+
+                # Register in pending-buy guard so the duplicate check in
+                # _execute_real() survives any subsequent sync_positions() clear
+                import time as _time
+                self._pending_buy_token_ids[token_id] = _time.time()
 
                 # Get cash after trade
                 cash_after = await self.balance_mgr.get_available_balance()
