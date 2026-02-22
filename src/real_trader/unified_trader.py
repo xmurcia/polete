@@ -385,8 +385,23 @@ class UnifiedTrader:
                 self._log_error(error_msg, context="SELL signal - position not found")
                 return None
 
-            # 2. Multi-strategy SELL with fallback (FOK@bid → FOK@ask → GTC@bid)
-            print(f"[UnifiedTrader] 🔍 Attempting to SELL {position.size:.4f} shares of {bucket}")
+            # 2. Cap sell size to actual on-chain CTF balance to avoid "not enough balance" errors
+            sell_size = position.size
+            ctf_balance = await self.balance_mgr.get_conditional_balance(position.token_id)
+            if ctf_balance <= 0:
+                print(f"[UnifiedTrader] ⚠️  CTF balance is 0 for {bucket} - check allowance setup (need setApprovalForAll)")
+            elif ctf_balance < sell_size:
+                print(f"[UnifiedTrader] ⚠️  CTF balance ({ctf_balance:.4f}) < tracked size ({sell_size:.4f}). Using actual balance.")
+                sell_size = ctf_balance
+
+            if sell_size < 0.001:
+                error_msg = f"Sell size too small ({sell_size:.6f}) for {bucket}"
+                print(f"[UnifiedTrader] ❌ {error_msg}")
+                self._log_error(error_msg, context=f"SELL {bucket} - zero CTF balance")
+                return None
+
+            # 3. Multi-strategy SELL with fallback (FOK@bid → FOK@ask → GTC@bid)
+            print(f"[UnifiedTrader] 🔍 Attempting to SELL {sell_size:.4f} shares of {bucket}")
 
             result = None
             final_price = price  # Track actual execution price
@@ -411,7 +426,7 @@ class UnifiedTrader:
             order_request_fok_bid = OrderRequest(
                 token_id=position.token_id,
                 price=price,
-                size=position.size,
+                size=sell_size,
                 side=Side.SELL,
                 order_type=OrderType.FOK,
                 event_slug=position.event_slug,
@@ -430,7 +445,7 @@ class UnifiedTrader:
                 order_request_fok_ask = OrderRequest(
                     token_id=position.token_id,
                     price=ask_price,
-                    size=position.size,
+                    size=sell_size,
                     side=Side.SELL,
                     order_type=OrderType.FOK,
                     event_slug=position.event_slug,
@@ -452,7 +467,7 @@ class UnifiedTrader:
                 order_request_gtc = OrderRequest(
                     token_id=position.token_id,
                     price=price,
-                    size=position.size,
+                    size=sell_size,
                     side=Side.SELL,
                     order_type=OrderType.GTC,  # Limit order - stays open until filled
                     event_slug=position.event_slug,
@@ -469,11 +484,11 @@ class UnifiedTrader:
             price = final_price
 
             if result.success:
-                print(f"[UnifiedTrader] ✅ SELL executed: {position.size:.4f} shares - Order {result.order_id}")
+                print(f"[UnifiedTrader] ✅ SELL executed: {sell_size:.4f} shares - Order {result.order_id}")
 
                 # Calculate P&L
-                revenue = position.size * price
-                cost = position.size * position.avg_entry_price
+                revenue = sell_size * price
+                cost = sell_size * position.avg_entry_price
                 profit = revenue - cost
 
                 # Track realized P&L
@@ -488,7 +503,7 @@ class UnifiedTrader:
                     market=market_title,
                     bucket=bucket,
                     price=price,
-                    shares=position.size,
+                    shares=sell_size,
                     reason=reason,
                     pnl=profit,
                     cash_after=cash_after,
@@ -509,7 +524,7 @@ class UnifiedTrader:
                         market=market_title,
                         bucket=bucket,
                         price=price,
-                        shares=position.size,
+                        shares=sell_size,
                         pnl=profit,
                         pnl_pct=(profit / cost) * 100 if cost > 0 else 0.0,
                         balance=cash_after,
