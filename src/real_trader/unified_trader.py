@@ -358,22 +358,88 @@ class UnifiedTrader:
                 print(f"[UnifiedTrader] 📋 Available positions: {[(self._token_metadata.get(p.token_id, {}).get('bucket', 'unknown'), p.event_slug) for p in positions]}")
                 return None
 
-            # 2. Create sell order (FOK = Fill or Kill, market order)
-            print(f"[UnifiedTrader] 🔍 Attempting to SELL {position.size:.4f} shares of {bucket} @ {price:.3f}¢")
+            # 2. Multi-strategy SELL with fallback (FOK@bid → FOK@ask → GTC@bid)
+            print(f"[UnifiedTrader] 🔍 Attempting to SELL {position.size:.4f} shares of {bucket}")
 
-            order_request = OrderRequest(
+            result = None
+            final_price = price  # Track actual execution price
+
+            # Get current order book to determine ask price for fallback
+            from src.clob_scanner import ClobMarketScanner
+            scanner = ClobMarketScanner()
+            order_book = scanner.get_bulk_prices([market_title])
+
+            # Find ask price for this bucket
+            ask_price = None
+            for market_ob in order_book:
+                if market_title.lower() in market_ob.get("title", "").lower():
+                    for b in market_ob.get("buckets", []):
+                        if b.get("bucket") == bucket:
+                            ask_price = b.get("ask")
+                            break
+                    break
+
+            # Strategy 1: Try FOK at BID price (conservative - best execution price)
+            print(f"[UnifiedTrader] 🎯 Strategy 1/3: FOK @ BID ${price:.3f}")
+            order_request_fok_bid = OrderRequest(
                 token_id=position.token_id,
                 price=price,
                 size=position.size,
                 side=Side.SELL,
-                order_type=OrderType.FOK,  # Market order - execute immediately or cancel
+                order_type=OrderType.FOK,
                 event_slug=position.event_slug,
                 range_label=position.range_label,
                 market_title=market_title,
                 token_side=position.token_side
             )
 
-            result = await self.order_mgr.place_order(order_request)
+            result = await self.order_mgr.place_order(order_request_fok_bid)
+
+            # Strategy 2: If FOK@bid fails due to liquidity, try FOK at ASK price (aggressive)
+            if not result.success and "fully filled" in str(result.error).lower() and ask_price and ask_price > price:
+                print(f"[UnifiedTrader] ⚠️  FOK@bid failed (low liquidity)")
+                print(f"[UnifiedTrader] 🎯 Strategy 2/3: FOK @ ASK ${ask_price:.3f} (more aggressive)")
+
+                order_request_fok_ask = OrderRequest(
+                    token_id=position.token_id,
+                    price=ask_price,
+                    size=position.size,
+                    side=Side.SELL,
+                    order_type=OrderType.FOK,
+                    event_slug=position.event_slug,
+                    range_label=position.range_label,
+                    market_title=market_title,
+                    token_side=position.token_side
+                )
+
+                result = await self.order_mgr.place_order(order_request_fok_ask)
+                if result.success:
+                    final_price = ask_price  # Update executed price
+                    print(f"[UnifiedTrader] ✅ Executed at ASK price (${ask_price:.3f})")
+
+            # Strategy 3: If still fails, use GTC (limit order that stays open)
+            if not result.success and "fully filled" in str(result.error).lower():
+                print(f"[UnifiedTrader] ⚠️  FOK@ask also failed")
+                print(f"[UnifiedTrader] 🎯 Strategy 3/3: GTC @ BID ${price:.3f} (limit order)")
+
+                order_request_gtc = OrderRequest(
+                    token_id=position.token_id,
+                    price=price,
+                    size=position.size,
+                    side=Side.SELL,
+                    order_type=OrderType.GTC,  # Limit order - stays open until filled
+                    event_slug=position.event_slug,
+                    range_label=position.range_label,
+                    market_title=market_title,
+                    token_side=position.token_side
+                )
+
+                result = await self.order_mgr.place_order(order_request_gtc)
+                if result.success:
+                    print(f"[UnifiedTrader] ⚠️  GTC order placed - will execute when liquidity available")
+
+            # Update price for P&L calculation to actual execution price
+            price = final_price
 
             if result.success:
                 print(f"[UnifiedTrader] ✅ SELL executed: {position.size:.4f} shares - Order {result.order_id}")
