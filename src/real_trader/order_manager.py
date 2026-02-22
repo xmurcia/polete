@@ -95,15 +95,9 @@ class OrderManager:
 
             # Use create_market_order for FOK/IOC (handles precision internally)
             if request.order_type.value in ["FOK", "IOC"]:
-                # Get tick_size from Polymarket API (cached by SDK)
-                try:
-                    tick_size_obj = self.client.get_tick_size(request.token_id)
-                    tick_size = str(tick_size_obj)  # Convert TickSize object to string
-                    print(f"[OrderManager] Retrieved tick_size={tick_size} from API")
-                except Exception as e:
-                    # Fallback: Determine tick_size based on price
-                    tick_size = "0.01" if price > 0.10 else "0.001"
-                    print(f"[OrderManager] Using fallback tick_size={tick_size} (API failed: {e})")
+                # Determine tick_size based on price (Polymarket convention)
+                # High price (>$0.10): 0.01, Low price (≤$0.10): 0.001
+                tick_size = "0.01" if price > 0.10 else "0.001"
 
                 market_order_args = MarketOrderArgs(
                     token_id=request.token_id,

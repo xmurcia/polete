@@ -726,8 +726,17 @@ def run():
             time.sleep(LOOP_DELAY_SECONDS) 
 
         except KeyboardInterrupt: break
-        except Exception as e: 
-            print(f"Loop Error: {e}"); time.sleep(LOOP_ERROR_RETRY_SECONDS)
+        except Exception as e:
+            error_msg = f"Loop Error: {e}"
+            print(error_msg)
+
+            # Send Telegram notification for critical errors (only in real mode)
+            if hasattr(trader, 'telegram') and trader.telegram and hasattr(trader, 'use_real') and trader.use_real:
+                import traceback
+                full_error = f"{error_msg}\n\n{traceback.format_exc()}"
+                trader.telegram.notify_error(full_error, context="Main loop exception")
+
+            time.sleep(LOOP_ERROR_RETRY_SECONDS)
 
 if __name__ == "__main__":
     run()

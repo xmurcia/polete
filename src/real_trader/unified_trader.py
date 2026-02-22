@@ -197,7 +197,10 @@ class UnifiedTrader:
             # 0. Get token_id FIRST (before position check)
             token_id = await self._resolve_token_id(market_title, bucket, side="YES")
             if not token_id:
-                print(f"[UnifiedTrader] ❌ Could not resolve token_id for {market_title} {bucket}")
+                error_msg = f"Could not resolve token_id for {market_title} {bucket}"
+                print(f"[UnifiedTrader] ❌ {error_msg}")
+                if self.telegram and self.use_real:
+                    self.telegram.notify_error(error_msg, context=f"BUY signal for {bucket}")
                 return None
 
             # 1. Sync positions and check if position already exists BY TOKEN_ID
@@ -238,7 +241,10 @@ class UnifiedTrader:
             # 4. Check if we have enough balance
             available = await self.balance_mgr.get_available_balance()
             if bet_amount > available:
-                print(f"[UnifiedTrader] ❌ Insufficient balance: need ${bet_amount:.2f}, have ${available:.2f}")
+                error_msg = f"Insufficient balance: need ${bet_amount:.2f}, have ${available:.2f}"
+                print(f"[UnifiedTrader] ❌ {error_msg}")
+                if self.telegram and self.use_real:
+                    self.telegram.notify_low_balance(available, bet_amount)
                 return None
 
             # 5. Create and place order (FOK = Fill or Kill, market order)
@@ -322,6 +328,14 @@ class UnifiedTrader:
                 return f"✅ BUY: ${bet_amount:.2f}"
             else:
                 print(f"[UnifiedTrader] ❌ Order failed: {result.error}")
+                if self.telegram and self.use_real:
+                    self.telegram.notify_order_failed(
+                        market=market_title,
+                        bucket=bucket,
+                        side="BUY",
+                        price=price,
+                        error=result.error
+                    )
                 return None
 
         # --- SELL/ROTATE Logic ---
@@ -354,8 +368,11 @@ class UnifiedTrader:
                         pass
 
             if not position:
-                print(f"[UnifiedTrader] ⚠️  No position found for {bucket} in market {market_title}")
+                error_msg = f"No position found for {bucket} in market {market_title}"
+                print(f"[UnifiedTrader] ⚠️  {error_msg}")
                 print(f"[UnifiedTrader] 📋 Available positions: {[(self._token_metadata.get(p.token_id, {}).get('bucket', 'unknown'), p.event_slug) for p in positions]}")
+                if self.telegram and self.use_real:
+                    self.telegram.notify_error(error_msg, context="SELL signal - position not found")
                 return None
 
             # 2. Multi-strategy SELL with fallback (FOK@bid → FOK@ask → GTC@bid)
@@ -496,6 +513,14 @@ class UnifiedTrader:
                 return f"💰 SELL: P&L ${profit:.2f}"
             else:
                 print(f"[UnifiedTrader] ❌ Order failed: {result.error}")
+                if self.telegram and self.use_real:
+                    self.telegram.notify_order_failed(
+                        market=market_title,
+                        bucket=bucket,
+                        side="SELL",
+                        price=price,
+                        error=result.error
+                    )
                 return None
 
         return None
