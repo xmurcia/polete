@@ -385,7 +385,7 @@ class UnifiedTrader:
                         bucket=bucket,
                         side="BUY",
                         price=price,
-                        error=result.error
+                        reason=str(result.error)
                     )
                 return None
 
@@ -585,7 +585,7 @@ class UnifiedTrader:
                         bucket=bucket,
                         side="SELL",
                         price=price,
-                        error=result.error
+                        reason=str(result.error)
                     )
                 return None
 
