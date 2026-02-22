@@ -65,8 +65,8 @@ class OrderManager:
         #             error=f"Exposure limit exceeded: {exposure*100:.1f}%"
         #         )
 
-        # Check balance
-        if self.balance_manager:
+        # Check balance (only for BUY - SELL orders need CTF tokens, not USDC)
+        if self.balance_manager and request.side == Side.BUY:
             order_value = request.price * request.size
             can_place = await self.balance_manager.can_place_order(order_value)
             if not can_place:
