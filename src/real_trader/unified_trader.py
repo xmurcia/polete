@@ -293,10 +293,11 @@ class UnifiedTrader:
                         "invested": bet_amount,
                         "strategy_tag": strategy_tag,
                         "token_id": token_id,
-                        "entry_z_score": entry_z_score
+                        "entry_z_score": entry_z_score,
+                        "mode": "REAL"
                     }
                     pos_id = f"{market_title}|{bucket}"
-                    db.shadow_write(db.upsert_position, pos_id, pos_data, mode="REAL")
+                    db.shadow_write(db.upsert_position, pos_id, pos_data)
 
                 # Send Telegram notification
                 if self.telegram:
@@ -407,7 +408,7 @@ class UnifiedTrader:
                 # Delete position from DB (shadow mode)
                 if DB_AVAILABLE:
                     pos_id = f"{market_title}|{bucket}"
-                    db.shadow_write(db.delete_position, pos_id, mode="REAL")
+                    db.shadow_write(db.delete_position, pos_id)
 
                 # Send Telegram notification
                 if self.telegram:
@@ -512,11 +513,14 @@ class UnifiedTrader:
 
                 for market in markets_in_event:
                     question = market.get("question", "").lower()
+
+                    # Use strict matching to avoid partial matches (65 matching 165-189)
+                    import re
                     match_found = (
                         bucket.lower() in question or
                         bucket.replace("-", " - ").lower() in question or
                         f"{bucket_min} to {bucket_max}".lower() in question or
-                        (bucket_min in question and bucket_max in question)
+                        bool(re.search(rf'\b{re.escape(bucket_min)}\b.*?\b{re.escape(bucket_max)}\b', question))
                     )
                     if match_found:
                         clob_token_ids = market.get("clobTokenIds", [])
@@ -637,7 +641,7 @@ class UnifiedTrader:
             for market in markets:
                 question = market.get("question", "").lower()
 
-                # Multiple matching strategies
+                # Multiple matching strategies (STRICT - avoid partial matches like 65 matching 165)
                 match_found = False
 
                 # Strategy 1: Exact bucket match "300-319"
@@ -652,8 +656,11 @@ class UnifiedTrader:
                 elif f"{bucket_min} to {bucket_max}".lower() in question:
                     match_found = True
 
-                # Strategy 4: Both numbers present in question
-                elif bucket_min in question and bucket_max in question:
+                # Strategy 4 REMOVED: Too permissive, causes false matches (65 matches 165-189)
+                # Use regex instead for word boundary matching
+                import re
+                bucket_pattern = rf'\b{re.escape(bucket_min)}\b.*?\b{re.escape(bucket_max)}\b'
+                if re.search(bucket_pattern, question):
                     match_found = True
 
                 if match_found:
