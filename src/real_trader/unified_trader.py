@@ -279,6 +279,20 @@ class UnifiedTrader:
                     'bucket': bucket
                 }
 
+                # Immediately add position to in-memory tracker so the next cycle
+                # sees it as "owned" even before the Polymarket data API propagates
+                # the new position (prevents duplicate buys across loop cycles)
+                self.position_tracker.add_position(
+                    token_id=token_id,
+                    event_slug=market_title,
+                    range_label=bucket,
+                    side=Side.BUY,
+                    size=shares,
+                    entry_price=price,
+                    market_title=market_title,
+                    token_side="YES"
+                )
+
                 # Get cash after trade
                 cash_after = await self.balance_mgr.get_available_balance()
 
@@ -318,8 +332,9 @@ class UnifiedTrader:
                 # Send Telegram notification
                 if self.telegram:
                     # Calculate total invested after this trade
+                    # (position is already in position_tracker from add_position above)
                     positions = self.position_tracker.get_positions()
-                    total_invested = sum(p.size * p.avg_entry_price for p in positions) + bet_amount
+                    total_invested = sum(p.size * p.avg_entry_price for p in positions)
 
                     self.telegram.notify_trade_buy(
                         market=market_title,
