@@ -367,7 +367,7 @@ class UnifiedTrader:
             # Get current order book to determine ask price for fallback
             from src.clob_scanner import ClobMarketScanner
             scanner = ClobMarketScanner()
-            order_book = scanner.get_bulk_prices([market_title])
+            order_book = scanner.get_market_prices()
 
             # Find ask price for this bucket
             ask_price = None
