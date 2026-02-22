@@ -426,6 +426,19 @@ def log_snapshot(
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
+            # Convert numpy types to Python native types
+            fair_value = context.get("fair")
+            if fair_value is not None:
+                fair_value = float(fair_value)
+
+            z_score = context.get("z")
+            if z_score is not None:
+                z_score = float(z_score)
+
+            pnl_value = context.get("pnl")
+            if pnl_value is not None:
+                pnl_value = float(pnl_value)
+
             cur.execute(
                 """
                 INSERT INTO trade_snapshots (action, market, bucket, price, reason, z_score, pnl_at_trade, mode,
@@ -438,10 +451,10 @@ def log_snapshot(
                     bucket,
                     price,
                     reason,
-                    context.get("z"),
-                    context.get("pnl"),
+                    z_score,
+                    pnl_value,
                     mode,
-                    context.get("fair"),
+                    fair_value,
                     hours_left,
                     tweet_count,
                 ),

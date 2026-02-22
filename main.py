@@ -119,10 +119,18 @@ def run():
     # ❄️ INIT COOLDOWNS: Memoria de castigos
     # ==============================================================================
     stop_loss_cooldowns = {}
-    moonshot_cooldowns = {} 
+    moonshot_cooldowns = {}
+
+    # ==============================================================================
+    # 🔒 TRADE LOCK: Evitar trades duplicados en el mismo ciclo
+    # ==============================================================================
+    executed_trades_this_cycle = set()  # Set of (market_title, bucket, signal) tuples 
 
     while True:
         try:
+            # Clear trade lock at the start of each cycle
+            executed_trades_this_cycle.clear()
+
             # Show mode indicator
             mode_indicator = "🔴 REAL" if (hasattr(trader, 'use_real') and trader.use_real) else "📄 PAPER"
             print(f"\n{'='*80}")
@@ -313,25 +321,32 @@ def run():
                                 profit_pct = (bid - entry) / entry if entry > 0 else 0
                                 
                                 if pos_data.get('strategy_tag') == 'MOONSHOT':
-                                    if bid <= MOONSHOT_EXIT_EXPIRED_PRICE:
-                                        action = "SMART_ROTATE"; reason = f"Moonshot Expired (Total Loss) Z{z_score:.1f}"
-                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
-                                        if res:
-                                            save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
-                                            moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXPIRED_HOURS)
-                                        continue
+                                    trade_key = (m_poly['title'], b['bucket'], "ROTATE")
+                                    if trade_key not in executed_trades_this_cycle:
+                                        if bid <= MOONSHOT_EXIT_EXPIRED_PRICE:
+                                            action = "SMART_ROTATE"; reason = f"Moonshot Expired (Total Loss) Z{z_score:.1f}"
+                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                            if res:
+                                                save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                                moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXPIRED_HOURS)
+                                                executed_trades_this_cycle.add(trade_key)
+                                            continue
 
-                                    if bid >= MOONSHOT_EXIT_VICTORY_PRICE:
-                                        action = "SMART_ROTATE"; reason = f"Moonshot Victory Lap (${bid:.2f}) Z{z_score:.1f}"
-                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
-                                        if res: save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
-                                        continue
+                                        if bid >= MOONSHOT_EXIT_VICTORY_PRICE:
+                                            action = "SMART_ROTATE"; reason = f"Moonshot Victory Lap (${bid:.2f}) Z{z_score:.1f}"
+                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                            if res:
+                                                save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                                executed_trades_this_cycle.add(trade_key)
+                                            continue
 
-                                    if MOONSHOT_EXIT_PARTIAL_MIN_PRICE <= bid <= MOONSHOT_EXIT_PARTIAL_MAX_PRICE and profit_pct >= MOONSHOT_EXIT_PARTIAL_MIN_PROFIT:
-                                        action = "SMART_ROTATE"; reason = f"Moonshot Partial Exit (Lock {profit_pct*100:.0f}%, ${bid:.2f})"
-                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
-                                        if res: save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
-                                        continue
+                                        if MOONSHOT_EXIT_PARTIAL_MIN_PRICE <= bid <= MOONSHOT_EXIT_PARTIAL_MAX_PRICE and profit_pct >= MOONSHOT_EXIT_PARTIAL_MIN_PROFIT:
+                                            action = "SMART_ROTATE"; reason = f"Moonshot Partial Exit (Lock {profit_pct*100:.0f}%, ${bid:.2f})"
+                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                            if res:
+                                                save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                                executed_trades_this_cycle.add(trade_key)
+                                            continue
 
                                     current_max = pos_data.get('max_price_seen', entry)
                                     if bid > current_max:
@@ -342,11 +357,14 @@ def run():
                                     if current_max >= MOONSHOT_TRAILING_PEAK_THRESHOLD:
                                         drawdown_from_peak = current_max - bid
                                         if drawdown_from_peak >= MOONSHOT_TRAILING_DRAWDOWN:
-                                            action = "SMART_ROTATE"; reason = f"Moonshot Trailing Stop (Peak ${current_max:.2f} -> ${bid:.2f}) Z{z_score:.1f}"
-                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
-                                            if res:
-                                                save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
-                                                moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXIT_HOURS)
+                                            trade_key = (m_poly['title'], b['bucket'], "ROTATE")
+                                            if trade_key not in executed_trades_this_cycle:
+                                                action = "SMART_ROTATE"; reason = f"Moonshot Trailing Stop (Peak ${current_max:.2f} -> ${bid:.2f}) Z{z_score:.1f}"
+                                                res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                                if res:
+                                                    save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                                    moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXIT_HOURS)
+                                                    executed_trades_this_cycle.add(trade_key)
                                             continue
                                     continue
                                 
@@ -416,9 +434,14 @@ def run():
                                     elif z_score > EXTREME_PANIC_Z and profit_pct < EXTREME_PANIC_MAX_PROFIT: should_sell = True; sell_reason = f"Extreme Panic (Z>{EXTREME_PANIC_Z})"
 
                                 if should_sell:
-                                    action = "SMART_ROTATE"; reason = f"{sell_reason} Z{z_score:.1f}"
-                                    res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
-                                    if res: save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                    # Check if trade already executed this cycle
+                                    trade_key = (m_poly['title'], b['bucket'], "ROTATE")
+                                    if trade_key not in executed_trades_this_cycle:
+                                        action = "SMART_ROTATE"; reason = f"{sell_reason} Z{z_score:.1f}"
+                                        res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason)
+                                        if res:
+                                            save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                            executed_trades_this_cycle.add(trade_key)  # Mark as executed
 
                         elif not owned and not IS_WARMUP:
                             bucket_headroom = b['max'] - m_poly['count']
@@ -489,9 +512,16 @@ def run():
                                                 pass
 
                                         if passes_clustering:
-                                            action = "BUY"; reason = f"Val+{edge:.2f}"
-                                            res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
-                                            if res: save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
+                                            # Check if trade already executed this cycle
+                                            trade_key = (m_poly['title'], b['bucket'], "BUY")
+                                            if trade_key not in executed_trades_this_cycle:
+                                                action = "BUY"; reason = f"Val+{edge:.2f}"
+                                                res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason)
+                                                if res:
+                                                    save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
+                                                    executed_trades_this_cycle.add(trade_key)  # Mark as executed
+                                            else:
+                                                action = "-"; reason = "Already executed this cycle"
 
                         color_act = f"🟢 {action}" if "BUY" in action else (f"🔴 {action}" if "ROTATE" in action or "PROFIT" in action else "-")
                         bucket_display = f"*{b['bucket']}" if owned else f"{b['bucket']}"
