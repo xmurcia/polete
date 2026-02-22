@@ -730,11 +730,24 @@ def run():
             error_msg = f"Loop Error: {e}"
             print(error_msg)
 
-            # Send Telegram notification for critical errors (only in real mode)
-            if hasattr(trader, 'telegram') and trader.telegram and hasattr(trader, 'use_real') and trader.use_real:
+            # Log error to file and send Telegram (only in real mode)
+            if hasattr(trader, 'use_real') and trader.use_real:
                 import traceback
-                full_error = f"{error_msg}\n\n{traceback.format_exc()}"
-                trader.telegram.notify_error(full_error, context="Main loop exception")
+
+                # Log to file with full traceback
+                if hasattr(trader, 'error_logger') and trader.error_logger:
+                    try:
+                        trader.error_logger.log_error(e, context="Main loop exception")
+                    except Exception as log_err:
+                        print(f"[ErrorLogger] Failed to log: {log_err}")
+
+                # Send Telegram notification
+                if hasattr(trader, 'telegram') and trader.telegram:
+                    try:
+                        full_error = f"{error_msg}\n\n{traceback.format_exc()}"
+                        trader.telegram.notify_error(full_error, context="Main loop exception")
+                    except Exception as tg_err:
+                        print(f"[Telegram] Failed to send: {tg_err}")
 
             time.sleep(LOOP_ERROR_RETRY_SECONDS)
 
