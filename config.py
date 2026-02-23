@@ -95,7 +95,7 @@ KELLY_EDGE_THRESHOLD_MED = 0.20     # 20% edge = medium confidence
 
 # Maximum Z-score to enter a trade (statistical distance from prediction)
 # Lower = closer to prediction, safer
-MAX_Z_SCORE_ENTRY = 0.85
+MAX_Z_SCORE_ENTRY = 0.75
 
 # Minimum ask price to consider (filters out nearly-expired buckets)
 MIN_PRICE_ENTRY = 0.02  # $0.02 minimum
@@ -104,7 +104,7 @@ MIN_PRICE_ENTRY = 0.02  # $0.02 minimum
 MIN_EDGE_BASE = 0.05  # 5% base edge required
 
 # Dynamic edge adjustment based on volatility
-EDGE_STD_MULTIPLIER = 0.01  # Add 0.5% per unit of std deviation (reduced from 0.01 to allow earlier entries in long events)
+EDGE_STD_MULTIPLIER = 0.01  # Add 1% per unit of std deviation (reduced from 0.01 to allow earlier entries in long events)
 
 # ==============================================================================
 # CLUSTERING (Position Concentration Strategy)
