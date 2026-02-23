@@ -188,7 +188,7 @@ STOP_LOSS_Z_MIN = 1.3
 # Catastrophic stop loss for final phase (< 24h remaining)
 # Only triggers when loss is extreme AND outcome is mathematically impossible
 STOP_LOSS_CATASTROPHIC = -0.75  # -75% loss (worse than normal -40%)
-STOP_LOSS_CATASTROPHIC_Z_MIN = 8.0  # Z > 8.0 = 8+ std deviations impossible
+STOP_LOSS_CATASTROPHIC_Z_MIN = 5.0  # Z > 5.0 = 5+ std deviations (99.9999% impossible)
 
 # ==============================================================================
 # EXIT CONDITIONS - EXTREME PANIC

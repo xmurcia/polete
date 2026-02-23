@@ -87,11 +87,17 @@ class OrderManager:
             # SELL: amount = shares to sell
             if request.side.value == "BUY":
                 amount = round(price * request.size, 2)  # USD amount
+                min_amount = 0.01  # Minimum $0.01
             else:
-                amount = request.size  # Share amount
+                amount = round(request.size, 4)  # Share amount (4 decimal precision)
+                min_amount = 0.001  # Minimum 0.001 shares
+
+            # Validate amount is above minimum threshold
+            if amount < min_amount:
+                raise ValueError(f"Amount too small: {amount} < {min_amount} (side={request.side.value})")
 
             print(f"[OrderManager] Creating {request.order_type} {request.side} order")
-            print(f"[OrderManager] Price: {price}, Amount: {amount}")
+            print(f"[OrderManager] Price: {price}, Amount: {amount} (min: {min_amount})")
 
             # Use create_market_order for FOK/IOC (handles precision internally)
             if request.order_type.value in ["FOK", "IOC"]:
@@ -170,9 +176,19 @@ class OrderManager:
 
             return OrderResult(success=True, order_id=order_id)
 
-        except Exception as e:
-            print(f"[OrderManager] ❌ Order failed: {e}")
+        except ValueError as e:
+            # Validation errors (amount too small, etc.)
+            print(f"[OrderManager] ⚠️  Validation failed: {e}")
             return OrderResult(success=False, error=str(e))
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[OrderManager] ❌ Order failed: {error_msg}")
+
+            # Detect allowance issues
+            if "not enough balance" in error_msg.lower() and request.side == Side.SELL:
+                print(f"[OrderManager] 💡 Hint: This might be an allowance issue. Run setup_allowance.py")
+
+            return OrderResult(success=False, error=error_msg)
 
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel an order"""
