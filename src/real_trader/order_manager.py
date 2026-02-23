@@ -88,13 +88,14 @@ class OrderManager:
             if request.side.value == "BUY":
                 amount = round(price * request.size, 2)  # USD amount
                 min_amount = 0.01  # Minimum $0.01
-            else:
-                amount = round(request.size, 4)  # Share amount (4 decimal precision)
-                min_amount = 0.001  # Minimum 0.001 shares
 
-            # Validate amount is above minimum threshold
-            if amount < min_amount:
-                raise ValueError(f"Amount too small: {amount} < {min_amount} (side={request.side.value})")
+                # Validate amount is above minimum threshold
+                if amount < min_amount:
+                    raise ValueError(f"Amount too small: {amount} < {min_amount} (side={request.side.value})")
+            else:
+                # SELL: Initial rounding (will be refined based on tick_size later)
+                amount = round(request.size, 4)  # Share amount
+                # Note: minimum validation for SELL happens after tick_size calculation
 
             print(f"[OrderManager] Creating {request.order_type} {request.side} order")
             print(f"[OrderManager] Price: {price}, Amount: {amount} (min: {min_amount})")
@@ -104,6 +105,26 @@ class OrderManager:
                 # Determine tick_size based on price (Polymarket convention)
                 # High price (>$0.10): 0.01, Low price (≤$0.10): 0.001
                 tick_size = "0.01" if price > 0.10 else "0.001"
+
+                # Round price to tick_size precision
+                tick_decimals = 2 if tick_size == "0.01" else 3
+                price = round(price, tick_decimals)
+
+                # For SELL orders: amount must be rounded to match tick_size precision
+                # SDK calculates maker/taker amounts internally as: amount * price
+                # If amount is too small or imprecise, it results in "amount must be higher than 0"
+                if request.side.value == "SELL":
+                    # Round amount (shares) to tick precision to ensure maker/taker amounts are valid
+                    amount = round(amount, tick_decimals)
+
+                    # Recalculate minimum based on tick_size
+                    # For maker/taker amounts to be >0: amount * price must be >= 0.01
+                    min_amount_for_price = max(0.01 / price, float(tick_size)) if price > 0 else 0.01
+                    if amount < min_amount_for_price:
+                        raise ValueError(
+                            f"Amount too small for price: {amount} shares @ ${price:.3f} "
+                            f"(min={min_amount_for_price:.3f} for maker/taker amounts >0)"
+                        )
 
                 market_order_args = MarketOrderArgs(
                     token_id=request.token_id,

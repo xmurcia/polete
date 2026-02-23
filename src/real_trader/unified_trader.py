@@ -445,11 +445,15 @@ class UnifiedTrader:
                 print(f"[UnifiedTrader] ⚠️  CTF balance ({ctf_balance:.4f}) < tracked size ({sell_size:.4f}). Using actual balance.")
                 sell_size = ctf_balance
 
-            # Round to 4 decimals for Polymarket precision
+            # Round to 4 decimals initially (will be refined by OrderManager based on tick_size)
             sell_size = round(sell_size, 4)
 
-            if sell_size < 0.001:
-                error_msg = f"Sell size too small ({sell_size:.6f}) for {bucket}"
+            # Calculate minimum sell size based on price to ensure maker/taker amounts > 0
+            # Formula: amount * price >= 0.01 (minimum for maker/taker)
+            min_sell_size = max(0.01 / price, 0.001) if price > 0 else 0.01
+
+            if sell_size < min_sell_size:
+                error_msg = f"Sell size too small ({sell_size:.6f}) for {bucket} @ ${price:.3f} (min={min_sell_size:.4f})"
                 print(f"[UnifiedTrader] ❌ {error_msg}")
                 self._log_error(error_msg, context=f"SELL {bucket} - size below minimum")
                 return None
