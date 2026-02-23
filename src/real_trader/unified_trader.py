@@ -448,10 +448,13 @@ class UnifiedTrader:
             # Round to 4 decimals for Polymarket precision
             sell_size = round(sell_size, 4)
 
-            if sell_size < 0.001:
+            # py-clob-client ROUNDING_CONFIG rounds maker_amount to 2 decimal places
+            # (size=2 for tick_size "0.001"), so any value < 0.005 truncates to 0.00
+            # on-chain and causes "invalid amounts, maker and taker amount must be > 0"
+            if sell_size < 0.01:
                 error_msg = f"Sell size too small ({sell_size:.6f}) for {bucket}"
                 print(f"[UnifiedTrader] ❌ {error_msg}")
-                self._log_error(error_msg, context=f"SELL {bucket} - size below minimum")
+                self._log_error(error_msg, context=f"SELL {bucket} - size below minimum (0.01)")
                 return None
 
             # 3. Multi-strategy SELL with fallback (FOK@bid → FOK@ask → GTC@bid)
@@ -495,8 +498,14 @@ class UnifiedTrader:
             if not result.success:
                 print(f"[UnifiedTrader] ❌ Strategy 1 failed: {result.error}")
 
-            # Strategy 2: If FOK@bid fails due to liquidity, try FOK at ASK price (aggressive)
-            if not result.success and "fully filled" in str(result.error).lower() and ask_price and ask_price > price:
+            # Strategy 2: If FOK@bid fails due to liquidity issues (no takers at bid),
+            # try FOK at ASK price. Triggers on both "fully filled" and "invalid amounts"
+            # since Polymarket API returns the latter when no counterparty exists for FOK.
+            fok_liquidity_error = (
+                "fully filled" in str(result.error).lower() or
+                "invalid amounts" in str(result.error).lower()
+            )
+            if not result.success and fok_liquidity_error and ask_price and ask_price > price:
                 print(f"[UnifiedTrader] ⚠️  FOK@bid failed (low liquidity)")
                 print(f"[UnifiedTrader] 🎯 Strategy 2/3: FOK @ ASK ${ask_price:.3f} (more aggressive)")
 
@@ -519,8 +528,10 @@ class UnifiedTrader:
                 else:
                     print(f"[UnifiedTrader] ❌ Strategy 2 failed: {result.error}")
 
-            # Strategy 3: If still fails, use GTC (limit order that stays open)
-            if not result.success and "fully filled" in str(result.error).lower():
+            # Strategy 3: GTC fallback for any FOK failure (stays open until filled)
+            # Triggers regardless of error type — GTC uses create_order (not create_market_order)
+            # and avoids the FOK "amounts > 0" validation entirely.
+            if not result.success:
                 print(f"[UnifiedTrader] ⚠️  FOK@ask also failed")
                 print(f"[UnifiedTrader] 🎯 Strategy 3/3: GTC @ BID ${price:.3f} (limit order)")
 
