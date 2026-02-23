@@ -428,16 +428,30 @@ class UnifiedTrader:
             # 2. Cap sell size to actual on-chain CTF balance to avoid "not enough balance" errors
             sell_size = position.size
             ctf_balance = await self.balance_mgr.get_conditional_balance(position.token_id)
+
+            print(f"[UnifiedTrader] 📊 Balance check: tracked={sell_size:.4f}, CTF on-chain={ctf_balance:.4f}")
+
             if ctf_balance <= 0:
-                print(f"[UnifiedTrader] ⚠️  CTF balance is 0 for {bucket} - check allowance setup (need setApprovalForAll)")
+                error_msg = f"CTF balance is 0 for {bucket} - allowance not set (need setApprovalForAll)"
+                print(f"[UnifiedTrader] ❌ {error_msg}")
+                self._log_error(error_msg, context=f"SELL {bucket} - zero CTF balance")
+                if self.telegram and self.use_real:
+                    self.telegram.notify_error(
+                        f"⚠️ Cannot sell {bucket}: CTF balance is 0. Run setup_allowance.py",
+                        context="Missing allowance"
+                    )
+                return None
             elif ctf_balance < sell_size:
                 print(f"[UnifiedTrader] ⚠️  CTF balance ({ctf_balance:.4f}) < tracked size ({sell_size:.4f}). Using actual balance.")
                 sell_size = ctf_balance
 
+            # Round to 4 decimals for Polymarket precision
+            sell_size = round(sell_size, 4)
+
             if sell_size < 0.001:
                 error_msg = f"Sell size too small ({sell_size:.6f}) for {bucket}"
                 print(f"[UnifiedTrader] ❌ {error_msg}")
-                self._log_error(error_msg, context=f"SELL {bucket} - zero CTF balance")
+                self._log_error(error_msg, context=f"SELL {bucket} - size below minimum")
                 return None
 
             # 3. Multi-strategy SELL with fallback (FOK@bid → FOK@ask → GTC@bid)
@@ -477,6 +491,10 @@ class UnifiedTrader:
 
             result = await self.order_mgr.place_order(order_request_fok_bid)
 
+            # Log failure reason for diagnostics
+            if not result.success:
+                print(f"[UnifiedTrader] ❌ Strategy 1 failed: {result.error}")
+
             # Strategy 2: If FOK@bid fails due to liquidity, try FOK at ASK price (aggressive)
             if not result.success and "fully filled" in str(result.error).lower() and ask_price and ask_price > price:
                 print(f"[UnifiedTrader] ⚠️  FOK@bid failed (low liquidity)")
@@ -498,6 +516,8 @@ class UnifiedTrader:
                 if result.success:
                     final_price = ask_price  # Update executed price
                     print(f"[UnifiedTrader] ✅ Executed at ASK price (${ask_price:.3f})")
+                else:
+                    print(f"[UnifiedTrader] ❌ Strategy 2 failed: {result.error}")
 
             # Strategy 3: If still fails, use GTC (limit order that stays open)
             if not result.success and "fully filled" in str(result.error).lower():
@@ -519,6 +539,9 @@ class UnifiedTrader:
                 result = await self.order_mgr.place_order(order_request_gtc)
                 if result.success:
                     print(f"[UnifiedTrader] ⚠️  GTC order placed - will execute when liquidity available")
+                else:
+                    print(f"[UnifiedTrader] ❌ Strategy 3 failed: {result.error}")
+                    print(f"[UnifiedTrader] ⚠️  All sell strategies exhausted - manual intervention needed")
 
             # Update price for P&L calculation to actual execution price
             price = final_price
