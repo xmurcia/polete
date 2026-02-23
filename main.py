@@ -447,7 +447,25 @@ def run():
                             bucket_headroom = b['max'] - m_poly['count']
                             hours_left = m_poly['hours']
 
+                            # =========================================================
+                            # 🛡️ LA REGLA DE CUARENTENA DINÁMICA (CERO DEPENDENCIAS)
+                            # =========================================================
+                            # Si al evento le faltan más de 72h (es un evento largo), cuarentena de 48h.
+                            # Si le faltan 72h o menos (es un evento corto), cuarentena de 24h.
+                            quarantine_limit = 48.0 if hours_left > 72.0 else 24.0
+                            
+                            is_quarantined = False
+                            if hours_left > quarantine_limit:
+                                ask_price = b.get('ask', 0)
+                                if ask_price > 0.02: # Si cuesta más de 2 centavos, no lo tocamos.
+                                    is_quarantined = True
+                                    
+                            if is_quarantined:
+                                continue # Ignoramos este bucket y pasamos al siguiente
+                            # =========================================================
+
                             if hours_left > TIME_REMAINING_HOURS_RUN: base_threshold = PROXIMITY_BASE_THRESHOLD_LONG
+
                             elif hours_left > 12.0: base_threshold = PROXIMITY_BASE_THRESHOLD_MID
                             elif hours_left > TIME_REMAINING_HOURS_SPRINT: base_threshold = PROXIMITY_BASE_THRESHOLD_SHORT
                             elif hours_left > TIME_REMAINING_HOURS_VERY_LATE: base_threshold = PROXIMITY_BASE_THRESHOLD_FINAL

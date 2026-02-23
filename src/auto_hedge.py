@@ -99,28 +99,30 @@ def gestionar_cobertura_final(trader, m_poly, clob_buckets):
                         break
 
         # ---------------------------------------------------------
-        # A) PROTECCIÓN CONTRA CAÍDA (FLOOR HEDGE)
+        # A) PROTECCIÓN ASIMÉTRICA CONTRA CAÍDA (FLOOR HEDGE)
         # ---------------------------------------------------------
         projected_floor = current_count + (floor_rate * p_hours_left)
 
         if projected_floor < lowest_owned['min'] and not has_neighbor_below:
-            # Exposed on downside and no natural coverage
-            target_max = lowest_owned['min'] - 1
-            _ejecutar_hedge(trader, m_poly, clob_buckets,
-                           target_match_func=lambda b: b['max'] == target_max,
-                           reason_tag=f"Floor Risk ({event_type}, proj {projected_floor:.0f})")
+            # Buscamos el bucket lejano que contiene la proyección de caída
+            _ejecutar_hedge(
+                trader, m_poly, clob_buckets,
+                target_match_func=lambda b: b['min'] <= projected_floor <= b['max'] and b['max'] < lowest_owned['min'],
+                reason_tag=f"Floor Risk ({event_type}, proj {projected_floor:.0f})"
+            )
 
         # ---------------------------------------------------------
-        # B) PROTECCIÓN CONTRA RAGE MODE (CEILING HEDGE)
+        # B) PROTECCIÓN ASIMÉTRICA CONTRA RAGE MODE (CEILING HEDGE)
         # ---------------------------------------------------------
         projected_ceiling = current_count + (ceiling_rate * p_hours_left)
 
         if highest_owned['max'] < BUCKET_MAX_OPEN_ENDED and projected_ceiling > highest_owned['max'] and not has_neighbor_above:
-            # Exposed on upside and no natural coverage
-            target_min = highest_owned['max'] + 1
-            _ejecutar_hedge(trader, m_poly, clob_buckets,
-                           target_match_func=lambda b: b['min'] == target_min,
-                           reason_tag=f"Ceiling Risk ({event_type}, proj {projected_ceiling:.0f})")
+            # Buscamos el bucket lejano que contiene la proyección de locura
+            _ejecutar_hedge(
+                trader, m_poly, clob_buckets,
+                target_match_func=lambda b: b['min'] <= projected_ceiling <= b['max'] and b['min'] > highest_owned['max'],
+                reason_tag=f"Ceiling Risk ({event_type}, proj {projected_ceiling:.0f})"
+            )
 
     except Exception as e:
         print(f"Error Auto-Hedge: {e}")

@@ -319,7 +319,7 @@ HEDGE_MAX_TIME_HOURS_SHORT = 6.0  # Last 6 hours only (not 12h - too early for s
 
 # Price filters for hedge positions (must be cheap insurance)
 HEDGE_MIN_PRICE = 0.005
-HEDGE_MAX_PRICE = 0.30  # Don't pay more than $0.30 for insurance
+HEDGE_MAX_PRICE = 0.12  # Don't pay more than $0.30 for insurance
 
 # Projection rates for hedge scenarios (LONG EVENTS ≥72h ONLY)
 HEDGE_FLOOR_RATE = 1.0    # Pessimistic: 1 tweet/hour (slow day)
