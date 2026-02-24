@@ -68,7 +68,9 @@ def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p
             candidates.sort(key=lambda x: x['dist'])
             best = candidates[0]
             print(f"    🛰️ MOONSHOT OPORTUNIDAD: {best['bucket']['bucket']} @ ${best['ask']:.2f}")
-            trader.execute(m_poly['title'], best['bucket']['bucket'], "BUY", best['ask'], "Moonshot V33", strategy_tag="MOONSHOT")
+            trader.execute(m_poly['title'], best['bucket']['bucket'], "BUY", best['ask'], "Moonshot V33",
+                          strategy_tag="MOONSHOT", hours_left=p_hours_left, tweet_count=p_count,
+                          market_consensus=None, entry_z_score=None)
             time.sleep(1.0)
 
     except Exception as e: pass
