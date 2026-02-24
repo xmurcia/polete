@@ -448,14 +448,12 @@ class UnifiedTrader:
             # Round to 4 decimals initially (will be refined by OrderManager based on tick_size)
             sell_size = round(sell_size, 4)
 
-            # Calculate minimum sell size based on price to ensure maker/taker amounts > 0
-            # Formula: amount * price >= 0.01 (minimum for maker/taker)
-            min_sell_size = max(0.01 / price, 0.001) if price > 0 else 0.01
-
-            if sell_size < min_sell_size:
-                error_msg = f"Sell size too small ({sell_size:.6f}) for {bucket} @ ${price:.3f} (min={min_sell_size:.4f})"
-                print(f"[UnifiedTrader] ❌ {error_msg}")
-                self._log_error(error_msg, context=f"SELL {bucket} - size below minimum")
+            # Basic sanity check: reject dust positions (< 0.001 shares)
+            # OrderManager will do precise validation with tick_size
+            if sell_size < 0.001:
+                error_msg = f"Position too small to sell: {sell_size:.6f} shares for {bucket}"
+                print(f"[UnifiedTrader] ⚠️  {error_msg}")
+                self._log_error(error_msg, context=f"SELL {bucket} - dust position")
                 return None
 
             # 3. Multi-strategy SELL with fallback (FOK@bid → FOK@ask → GTC@bid)
