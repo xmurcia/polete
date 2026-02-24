@@ -73,7 +73,8 @@ class BalanceManager:
         try:
             params = BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL, token_id=token_id)
             response = self.client.get_balance_allowance(params)
-            balance = float(response.get("balance", 0)) / 1e6
+            # CTF balance is returned in human-readable format (already divided by 1e6)
+            balance = float(response.get("balance", 0))
             return balance
         except Exception as e:
             print(f"[BalanceManager] ⚠️  CTF balance fetch failed: {e}")
