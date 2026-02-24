@@ -95,10 +95,14 @@ class OrderManager:
             else:
                 # SELL: Initial rounding (will be refined based on tick_size later)
                 amount = round(request.size, 4)  # Share amount
+                min_amount = None  # Will be calculated after tick_size determination
                 # Note: minimum validation for SELL happens after tick_size calculation
 
             print(f"[OrderManager] Creating {request.order_type} {request.side} order")
-            print(f"[OrderManager] Price: {price}, Amount: {amount} (min: {min_amount})")
+            if min_amount is not None:
+                print(f"[OrderManager] Price: {price}, Amount: {amount} (min: {min_amount})")
+            else:
+                print(f"[OrderManager] Price: {price}, Amount: {amount} (min validation pending)")
 
             # Use create_market_order for FOK/IOC (handles precision internally)
             if request.order_type.value in ["FOK", "IOC"]:
