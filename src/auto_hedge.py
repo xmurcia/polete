@@ -154,5 +154,9 @@ def _ejecutar_hedge(trader, m_poly, clob_buckets, target_match_func, reason_tag)
                     "BUY_HEDGE",
                     ask_price,
                     f"Auto-Hedge: {reason_tag}",
-                    strategy_tag="HEDGE"
+                    strategy_tag="HEDGE",
+                    hours_left=p_hours_left,
+                    tweet_count=current_count,
+                    market_consensus=None,
+                    entry_z_score=None
                 )

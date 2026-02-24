@@ -78,12 +78,17 @@ CREATE TABLE IF NOT EXISTS trades (
     pnl         NUMERIC(10,4) DEFAULT 0,
     cash_after  NUMERIC(10,4),
     mode        TEXT DEFAULT 'PAPER',   -- PAPER | REAL
-    strategy    TEXT DEFAULT 'STANDARD' -- STANDARD | MOONSHOT | HEDGE | LOTTO
+    strategy    TEXT DEFAULT 'STANDARD', -- STANDARD | MOONSHOT | HEDGE | LOTTO
+    hours_left  NUMERIC(8,3),           -- Tiempo restante del mercado en horas
+    tweet_count INT,                    -- Conteo actual de tweets
+    market_consensus NUMERIC(10,4)      -- Consenso del mercado (probabilidad)
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_ts     ON trades (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_action ON trades (action);
 CREATE INDEX IF NOT EXISTS idx_trades_bucket ON trades (bucket);
+CREATE INDEX IF NOT EXISTS idx_trades_hours_left ON trades (hours_left);
+CREATE INDEX IF NOT EXISTS idx_trades_tweet_count ON trades (tweet_count);
 
 -- Posiciones abiertas (reemplaza portfolio.json → positions)
 CREATE TABLE IF NOT EXISTS positions (
@@ -97,6 +102,7 @@ CREATE TABLE IF NOT EXISTS positions (
     strategy_tag    TEXT DEFAULT 'STANDARD',
     token_id        TEXT,               -- solo en modo REAL
     max_price_seen  NUMERIC(10,4),
+    entry_z_score   NUMERIC(10,4),      -- Z-score en el momento de entrada
     opened_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     mode            TEXT DEFAULT 'PAPER'
 );
@@ -129,6 +135,9 @@ CREATE TABLE IF NOT EXISTS trade_snapshots (
     reason       TEXT,
     z_score      NUMERIC(10,4),          -- context.z del snapshot original
     pnl_at_trade NUMERIC(10,4),          -- context.pnl (solo en ventas)
+    fair_value   NUMERIC(10,4),          -- fair value predicho por el modelo
+    hours_left   NUMERIC(8,3),           -- horas restantes del mercado
+    tweet_count  INT,                    -- conteo de tweets en el momento
     mode         TEXT DEFAULT 'PAPER'
 );
 
@@ -145,7 +154,9 @@ CREATE TABLE IF NOT EXISTS market_tape (
     market      TEXT NOT NULL,
     tweet_count INT,
     hours_left  NUMERIC(8,3),
-    daily_avg   NUMERIC(8,3)
+    daily_avg   NUMERIC(8,3),
+    market_id   TEXT,               -- ID del mercado de Polymarket
+    is_active   BOOLEAN DEFAULT TRUE -- Si el mercado está activo
 );
 
 CREATE INDEX IF NOT EXISTS idx_tape_ts     ON market_tape (ts DESC);
