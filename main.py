@@ -116,10 +116,42 @@ def run():
         except: pass
 
     # ==============================================================================
-    # ❄️ INIT COOLDOWNS: Memoria de castigos
+    # ❄️ INIT COOLDOWNS: Memoria de castigos (persistida en logs/cooldowns.json)
     # ==============================================================================
-    stop_loss_cooldowns = {}
-    moonshot_cooldowns = {}
+    COOLDOWNS_FILE = os.path.join(LOGS_DIR, "cooldowns.json")
+
+    def load_cooldowns() -> tuple[dict, dict]:
+        """Carga cooldowns desde fichero, descartando los ya expirados."""
+        if not os.path.exists(COOLDOWNS_FILE):
+            return {}, {}
+        try:
+            with open(COOLDOWNS_FILE) as f:
+                data = json.load(f)
+            now = datetime.now()
+            sl = {k: datetime.fromisoformat(v) for k, v in data.get("stop_loss", {}).items()
+                  if datetime.fromisoformat(v) > now}
+            ms = {k: datetime.fromisoformat(v) for k, v in data.get("moonshot", {}).items()
+                  if datetime.fromisoformat(v) > now}
+            print(f"[Cooldowns] ✅ Cargados: {len(sl)} stop_loss, {len(ms)} moonshot activos")
+            return sl, ms
+        except Exception as e:
+            print(f"[Cooldowns] ⚠️  Error cargando: {e}")
+            return {}, {}
+
+    def save_cooldowns(sl: dict, ms: dict):
+        """Persiste cooldowns activos a fichero."""
+        try:
+            data = {
+                "stop_loss": {k: v.isoformat() for k, v in sl.items()},
+                "moonshot":  {k: v.isoformat() for k, v in ms.items()},
+                "saved_at":  datetime.now().isoformat()
+            }
+            with open(COOLDOWNS_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"[Cooldowns] ⚠️  Error guardando: {e}")
+
+    stop_loss_cooldowns, moonshot_cooldowns = load_cooldowns()
 
     # ==============================================================================
     # 🔒 TRADE LOCK: Evitar trades duplicados en el mismo ciclo
@@ -335,6 +367,7 @@ def run():
                                             if res:
                                                 save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXPIRED_HOURS)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns)
                                                 executed_trades_this_cycle.add(trade_key)
                                             continue
 
@@ -379,6 +412,7 @@ def run():
                                                 if res:
                                                     save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                     moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXIT_HOURS)
+                                                    save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns)
                                                     executed_trades_this_cycle.add(trade_key)
                                             continue
                                     continue
@@ -466,6 +500,10 @@ def run():
                                                             entry_z_score=z_score)
                                         if res:
                                             save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
+                                            # Persistir stop_loss_cooldown si aplica
+                                            if "Stop Loss" in sell_reason or "Catastrophic" in sell_reason or "Emergency" in sell_reason or "Panic" in sell_reason:
+                                                stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_STOP_LOSS_HOURS)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns)
                                             executed_trades_this_cycle.add(trade_key)  # Mark as executed
 
                         elif not owned and not IS_WARMUP:
