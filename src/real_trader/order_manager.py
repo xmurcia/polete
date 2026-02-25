@@ -3,6 +3,7 @@ Order Manager for Polymarket trading.
 Handles order placement, cancellation, and tracking.
 """
 
+import math
 import os
 import time
 from typing import Dict, Set, List, Optional
@@ -118,8 +119,10 @@ class OrderManager:
                 # SDK calculates maker/taker amounts internally as: amount * price
                 # If amount is too small or imprecise, it results in "amount must be higher than 0"
                 if request.side.value == "SELL":
-                    # Round amount (shares) to tick precision to ensure maker/taker amounts are valid
-                    amount = round(amount, tick_decimals)
+                    # Floor-round shares to tick precision — NEVER round up on SELL.
+                    # round() can produce an amount > actual CTF balance (e.g. round(41.6666, 2)=41.67)
+                    # which makes Polymarket reject with "not enough balance / allowance".
+                    amount = math.floor(amount * 10**tick_decimals) / 10**tick_decimals
 
                     # Recalculate minimum based on tick_size
                     # For maker/taker amounts to be >0: amount * price must be >= 0.01

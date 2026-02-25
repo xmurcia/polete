@@ -3,6 +3,7 @@ Unified Trader - Wrapper que unifica PaperTrader y RealTrader.
 Permite cambiar entre paper y real con un simple bool.
 """
 
+import math
 import os
 import sys
 from typing import Optional, Dict, Any
@@ -445,8 +446,13 @@ class UnifiedTrader:
                 print(f"[UnifiedTrader] ⚠️  CTF balance ({ctf_balance:.4f}) < tracked size ({sell_size:.4f}). Using actual balance.")
                 sell_size = ctf_balance
 
-            # Round to 4 decimals initially (will be refined by OrderManager based on tick_size)
-            sell_size = round(sell_size, 4)
+            # Floor-round to 4 decimals — NEVER round up.
+            # round() can push sell_size above ctf_balance and trigger "not enough balance".
+            sell_size = math.floor(sell_size * 10000) / 10000
+            # Belt-and-suspenders: re-cap to ctf_balance after rounding
+            if sell_size > ctf_balance:
+                print(f"[UnifiedTrader] ⚠️  sell_size after floor-round ({sell_size:.4f}) still > CTF balance ({ctf_balance:.4f}), capping.")
+                sell_size = math.floor(ctf_balance * 10000) / 10000
 
             # Basic sanity check: reject dust positions (< 0.001 shares)
             # OrderManager will do precise validation with tick_size
@@ -497,9 +503,20 @@ class UnifiedTrader:
             if not result.success:
                 print(f"[UnifiedTrader] ❌ Strategy 1 failed: {result.error}")
 
-            # Strategy 2: If FOK@bid fails due to liquidity, try FOK at ASK price (aggressive)
-            if not result.success and "fully filled" in str(result.error).lower() and ask_price and ask_price > price:
-                print(f"[UnifiedTrader] ⚠️  FOK@bid failed (low liquidity)")
+            # Detect non-retriable errors (changing price/order-type won't fix these)
+            _err_lower = str(result.error).lower() if not result.success else ""
+            _is_balance_error = "not enough balance" in _err_lower or (
+                "allowance" in _err_lower and "not enough" in _err_lower
+            )
+
+            if not result.success and _is_balance_error:
+                print(f"[UnifiedTrader] ❌ Balance/allowance error — fallbacks skipped (retrying won't help). "
+                      f"CTF balance={ctf_balance:.4f}, sell_size={sell_size:.4f}. "
+                      f"Check setApprovalForAll or run setup_allowance.py.")
+
+            # Strategy 2: If FOK@bid fails for retriable reasons, try FOK at ASK price (aggressive)
+            if not result.success and not _is_balance_error and ask_price and ask_price > price:
+                print(f"[UnifiedTrader] ⚠️  FOK@bid failed (error: {result.error})")
                 print(f"[UnifiedTrader] 🎯 Strategy 2/3: FOK @ ASK ${ask_price:.3f} (more aggressive)")
 
                 order_request_fok_ask = OrderRequest(
@@ -520,9 +537,13 @@ class UnifiedTrader:
                     print(f"[UnifiedTrader] ✅ Executed at ASK price (${ask_price:.3f})")
                 else:
                     print(f"[UnifiedTrader] ❌ Strategy 2 failed: {result.error}")
+                    _err_lower = str(result.error).lower()
+                    _is_balance_error = "not enough balance" in _err_lower or (
+                        "allowance" in _err_lower and "not enough" in _err_lower
+                    )
 
-            # Strategy 3: If still fails, use GTC (limit order that stays open)
-            if not result.success and "fully filled" in str(result.error).lower():
+            # Strategy 3: If still fails for retriable reasons, use GTC (limit order that stays open)
+            if not result.success and not _is_balance_error:
                 print(f"[UnifiedTrader] ⚠️  FOK@ask also failed")
                 print(f"[UnifiedTrader] 🎯 Strategy 3/3: GTC @ BID ${price:.3f} (limit order)")
 
