@@ -178,6 +178,11 @@ STOP_LOSS_CHEAP_THRESHOLD = 0.12  # $0.12
 # Stop loss disabled in late game (< 48h remaining)
 STOP_LOSS_LATE_GAME = -2.0  # No stop loss
 
+# Mid-game emergency stop (24-48h): Cubre el gap donde STOP_LOSS_LATE_GAME anula el sl_limit normal
+# Solo se activa con pérdidas extremas Y Z-score alto (estadísticamente imposible recuperar)
+STOP_LOSS_MID_GAME_EMERGENCY = -0.60  # -60% pérdida en franja 24-48h
+STOP_LOSS_MID_GAME_Z_MIN = 4.0        # Z > 4.0 = muy lejos de la predicción
+
 # Minimum Z-score to trigger stop loss (prevents panic selling)
 STOP_LOSS_Z_MIN = 1.3
 
