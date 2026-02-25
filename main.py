@@ -333,7 +333,7 @@ def run():
                                                                 tweet_count=p_count, market_consensus=consensus,
                                                                 entry_z_score=z_score)
                                             if res:
-                                                save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                                save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXPIRED_HOURS)
                                                 executed_trades_this_cycle.add(trade_key)
                                             continue
@@ -345,7 +345,7 @@ def run():
                                                                 tweet_count=p_count, market_consensus=consensus,
                                                                 entry_z_score=z_score)
                                             if res:
-                                                save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                                save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 executed_trades_this_cycle.add(trade_key)
                                             continue
 
@@ -356,7 +356,7 @@ def run():
                                                                 tweet_count=p_count, market_consensus=consensus,
                                                                 entry_z_score=z_score)
                                             if res:
-                                                save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                                save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 executed_trades_this_cycle.add(trade_key)
                                             continue
 
@@ -377,7 +377,7 @@ def run():
                                                                     tweet_count=p_count, market_consensus=consensus,
                                                                     entry_z_score=z_score)
                                                 if res:
-                                                    save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                                    save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                     moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXIT_HOURS)
                                                     executed_trades_this_cycle.add(trade_key)
                                             continue
@@ -443,6 +443,13 @@ def run():
                                     else:
                                         sl_limit = STOP_LOSS_NORMAL
 
+                                    # 🚨 MID-GAME EMERGENCY STOP (24-48h): Cubre el gap donde sl_limit se anula
+                                    # Evita que una posición se hunda >60% en la franja crítica sin ningún freno
+                                    if (TIME_REMAINING_HOURS_RUN < hours_left <= VICTORY_LAP_TIME_HOURS
+                                            and profit_pct < STOP_LOSS_MID_GAME_EMERGENCY
+                                            and z_score > STOP_LOSS_MID_GAME_Z_MIN):
+                                        should_sell = True; sell_reason = f"Mid-Game Emergency Stop ({profit_pct*100:.0f}%, Z{z_score:.1f})"
+
                                     if hours_left < VICTORY_LAP_TIME_HOURS: sl_limit = STOP_LOSS_LATE_GAME
 
                                     if profit_pct < sl_limit and z_score > STOP_LOSS_Z_MIN: should_sell = True; sell_reason = f"Stop Loss Adaptativo (Hit {profit_pct*100:.1f}%)"
@@ -458,7 +465,7 @@ def run():
                                                             tweet_count=p_count, market_consensus=consensus,
                                                             entry_z_score=z_score)
                                         if res:
-                                            save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct})
+                                            save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                             executed_trades_this_cycle.add(trade_key)  # Mark as executed
 
                         elif not owned and not IS_WARMUP:
@@ -557,7 +564,7 @@ def run():
                                                                     tweet_count=p_count, market_consensus=consensus,
                                                                     entry_z_score=z_score)
                                                 if res:
-                                                    save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair})
+                                                    save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair}, hours_left=p_hours_left, tweet_count=p_count)
                                                     executed_trades_this_cycle.add(trade_key)  # Mark as executed
                                             else:
                                                 action = "-"; reason = "Already executed this cycle"
