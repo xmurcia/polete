@@ -277,7 +277,9 @@ class UnifiedTrader:
                     self.telegram.notify_low_balance(available, bet_amount)
                 return None
 
-            # 5. Create and place order (FOK = Fill or Kill, market order)
+            # 5. Create and place order with fallback (FOK → GTC)
+            # Strategy 1: FOK (Fill or Kill) - immediate execution
+            print(f"[UnifiedTrader] 🎯 BUY Strategy 1/2: FOK @ ${price:.3f}")
             order_request = OrderRequest(
                 token_id=token_id,
                 price=price,  # Ask price from bot
@@ -291,6 +293,29 @@ class UnifiedTrader:
             )
 
             result = await self.order_mgr.place_order(order_request)
+
+            # Strategy 2: If FOK fails due to liquidity, fallback to GTC (limit order)
+            if not result.success and "fully filled" in str(result.error).lower():
+                print(f"[UnifiedTrader] ⚠️  FOK rejected (no liquidity)")
+                print(f"[UnifiedTrader] 🎯 BUY Strategy 2/2: GTC @ ${price:.3f} (limit order)")
+
+                order_request_gtc = OrderRequest(
+                    token_id=token_id,
+                    price=price,
+                    size=shares,
+                    side=Side.BUY,
+                    order_type=OrderType.GTC,  # Limit order - stays open until filled
+                    event_slug=market_title,
+                    range_label=bucket,
+                    market_title=market_title,
+                    token_side="YES"
+                )
+
+                result = await self.order_mgr.place_order(order_request_gtc)
+                if result.success:
+                    print(f"[UnifiedTrader] ✅ GTC order placed - will fill when liquidity available")
+                else:
+                    print(f"[UnifiedTrader] ❌ GTC also failed: {result.error}")
 
             if result.success:
                 # Cache token metadata for display purposes
