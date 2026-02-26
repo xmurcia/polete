@@ -192,7 +192,8 @@ class UnifiedTrader:
             # Paper mode - PaperTrader handles its own logging
             return self._paper_trader.execute(
                 market_title, bucket, signal, price, reason, strategy_tag,
-                hours_left, tweet_count, market_consensus, entry_z_score
+                hours_left, tweet_count, market_consensus, entry_z_score,
+                tick_size=tick_size
             )
 
     async def _execute_real(
@@ -371,7 +372,9 @@ class UnifiedTrader:
                     strategy=strategy_tag,
                     hours_left=hours_left,
                     tweet_count=tweet_count,
-                    market_consensus=market_consensus
+                    market_consensus=market_consensus,
+                    pos_id=pos_id,
+                    entry_signal_reason=reason
                 )
 
                 # Write position to DB (shadow mode)
@@ -583,6 +586,7 @@ class UnifiedTrader:
                     print(f"[UnifiedTrader] ⚠️  All sell strategies exhausted - manual intervention needed")
 
             # Update price for P&L calculation to actual execution price
+            intended_price = price  # Guardar precio intentado para cálculo de slippage
             price = final_price
 
             if result.success:
@@ -593,14 +597,27 @@ class UnifiedTrader:
                 cost = sell_size * position.avg_entry_price
                 profit = revenue - cost
 
+                # Clasificar resultado del trade
+                if profit > 0.01:
+                    outcome = "profitable"
+                elif profit < -0.01:
+                    outcome = "loss"
+                else:
+                    outcome = "break_even"
+
+                # Calcular slippage real: precio ejecutado vs. precio intentado
+                slippage_val = round(price - intended_price, 4) if intended_price > 0 else None
+
                 # Track realized P&L
                 self.balance_mgr.add_realized_pnl(profit)
 
                 # Get cash after trade
                 cash_after = await self.balance_mgr.get_available_balance()
 
-                # Log trade (with context for dual-write)
-                self._log_trade(
+                pos_id = f"{market_title}|{bucket}"
+
+                # Log trade to CSV + DB (dual-write). Captura trade_id para enlazar con position.
+                trade_id = self._log_trade(
                     action="SELL",
                     market=market_title,
                     bucket=bucket,
@@ -612,13 +629,16 @@ class UnifiedTrader:
                     strategy=strategy_tag,
                     hours_left=hours_left,
                     tweet_count=tweet_count,
-                    market_consensus=market_consensus
+                    market_consensus=market_consensus,
+                    pos_id=pos_id,
+                    exit_signal_reason=reason,
+                    trade_outcome_label=outcome,
+                    slippage=slippage_val
                 )
 
-                # Delete position from DB (shadow mode)
+                # Close position in DB with realized_pnl and last_trade_id (auditoría)
                 if DB_AVAILABLE:
-                    pos_id = f"{market_title}|{bucket}"
-                    db.shadow_write(db.delete_position, pos_id)
+                    db.shadow_write(db.close_position, pos_id, profit, trade_id)
 
                 # Send Telegram notification
                 if self.telegram:
@@ -1182,8 +1202,11 @@ class UnifiedTrader:
     def _log_trade(self, action: str, market: str, bucket: str, price: float,
                    shares: float, reason: str, pnl: float = 0.0, cash_after: float = 0.0,
                    strategy: str = "STANDARD", hours_left: Optional[float] = None,
-                   tweet_count: Optional[int] = None, market_consensus: Optional[float] = None):
-        """Log trade to CSV and DB (dual-write)"""
+                   tweet_count: Optional[int] = None, market_consensus: Optional[float] = None,
+                   pos_id: Optional[str] = None, entry_signal_reason: Optional[str] = None,
+                   exit_signal_reason: Optional[str] = None, trade_outcome_label: Optional[str] = None,
+                   external_event_ref: Optional[str] = None, slippage: Optional[float] = None):
+        """Log trade to CSV and DB (dual-write). Devuelve trade_id de DB si disponible, else None."""
         from datetime import datetime
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1198,8 +1221,9 @@ class UnifiedTrader:
             f.write(row)
 
         # 2. Escribir a DB en shadow mode (OPCIONAL - no bloquea si falla)
+        trade_id = None
         if DB_AVAILABLE:
-            db.shadow_write(
+            trade_id = db.shadow_write(
                 db.log_trade,
                 action=action,
                 market=market,
@@ -1213,10 +1237,17 @@ class UnifiedTrader:
                 strategy=strategy,
                 hours_left=hours_left,
                 tweet_count=tweet_count,
-                market_consensus=market_consensus
+                market_consensus=market_consensus,
+                pos_id=pos_id,
+                entry_signal_reason=entry_signal_reason,
+                exit_signal_reason=exit_signal_reason,
+                trade_outcome_label=trade_outcome_label,
+                external_event_ref=external_event_ref,
+                slippage=slippage
             )
 
         print(f"[UnifiedTrader] 📝 Logged: {action} {bucket} @ ${price:.3f}")
+        return trade_id
 
     @property
     def portfolio(self):

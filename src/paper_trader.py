@@ -58,7 +58,10 @@ class PaperTrader:
             return f"{month_map.get(m1.lower(), m1[:3])} {d1} - {month_map.get(m2.lower(), m2[:3])} {d2}"
         return "Evento Global"
 
-    def _log_trade(self, action, market, bucket, price, shares, reason, pnl=0.0, strategy="STANDARD", hours_left=None, tweet_count=None, market_consensus=None):
+    def _log_trade(self, action, market, bucket, price, shares, reason, pnl=0.0, strategy="STANDARD",
+                   hours_left=None, tweet_count=None, market_consensus=None,
+                   pos_id=None, entry_signal_reason=None, exit_signal_reason=None,
+                   trade_outcome_label=None, external_event_ref=None, slippage=None):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         market_clean = market.replace(",", "")
         reason_clean = reason.replace(",", ".")
@@ -83,10 +86,18 @@ class PaperTrader:
                 strategy=strategy,
                 hours_left=hours_left,
                 tweet_count=tweet_count,
-                market_consensus=market_consensus
+                market_consensus=market_consensus,
+                pos_id=pos_id,
+                entry_signal_reason=entry_signal_reason,
+                exit_signal_reason=exit_signal_reason,
+                trade_outcome_label=trade_outcome_label,
+                external_event_ref=external_event_ref,
+                slippage=slippage
             )
 
-    def execute(self, market_title, bucket, signal, price, reason="Manual", strategy_tag="STANDARD", hours_left=None, tweet_count=None, market_consensus=None, entry_z_score=None):
+    def execute(self, market_title, bucket, signal, price, reason="Manual", strategy_tag="STANDARD",
+                hours_left=None, tweet_count=None, market_consensus=None, entry_z_score=None,
+                external_event_ref=None, tick_size=None):
         pos_id = f"{market_title}|{bucket}"
 
         # BUY (Incluye soporte para HEDGE)
@@ -130,7 +141,9 @@ class PaperTrader:
                     self._save()
                     self._log_trade(signal, market_title, bucket, price, shares, reason,
                                   strategy=strategy_tag, hours_left=hours_left,
-                                  tweet_count=tweet_count, market_consensus=market_consensus)
+                                  tweet_count=tweet_count, market_consensus=market_consensus,
+                                  pos_id=pos_id, entry_signal_reason=reason,
+                                  external_event_ref=external_event_ref)
                     return f"✅ BUY: ${bet_amount:.2f}"
 
         # SELL (Incluye TAKE PROFIT y ROTATE)
@@ -142,14 +155,31 @@ class PaperTrader:
                 self.portfolio["cash"] += revenue
                 self.portfolio["history"].append({"market": market_title, "profit": profit})
 
-                # Eliminar posición de DB también
+                # Clasificar resultado del trade
+                if profit > 0.01:
+                    outcome = "profitable"
+                elif profit < -0.01:
+                    outcome = "loss"
+                else:
+                    outcome = "break_even"
+
+                # Calcular slippage (diferencia entre precio esperado y ejecutado)
+                slippage_val = None
+                entry_price = pos.get("entry_price", 0)
+                if entry_price > 0:
+                    slippage_val = round(price - entry_price, 4)
+
+                # Eliminar posición de DB (con realized_pnl para auditoría)
                 if DB_AVAILABLE:
-                    db.shadow_write(db.delete_position, pos_id)
+                    db.shadow_write(db.close_position, pos_id, profit)
 
                 self._save()
                 self._log_trade(signal, market_title, bucket, price, pos['shares'], reason, pnl=profit,
                               strategy=pos.get("strategy_tag", "STANDARD"), hours_left=hours_left,
-                              tweet_count=tweet_count, market_consensus=market_consensus)
+                              tweet_count=tweet_count, market_consensus=market_consensus,
+                              pos_id=pos_id, exit_signal_reason=reason,
+                              trade_outcome_label=outcome, slippage=slippage_val,
+                              external_event_ref=external_event_ref)
                 return f"💰 SELL: P&L ${profit:.2f}"
         return None
 
