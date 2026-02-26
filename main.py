@@ -158,6 +158,9 @@ def run():
     # ==============================================================================
     executed_trades_this_cycle = set()  # Set of (market_title, bucket, signal) tuples 
 
+    # Cache de fair values por mercado para persistir en market_tape
+    fair_values_cache = {}  # {market_title: weighted_avg_fair_value}
+
     while True:
         try:
             # Clear trade lock at the start of each cycle
@@ -204,7 +207,8 @@ def run():
             if clob_data:
                 # Tape
                 if time.time() - last_tape > MARKET_TAPE_SAVE_INTERVAL_SECONDS:
-                    save_market_tape(clob_data, markets); last_tape = time.time()
+                    save_market_tape(clob_data, markets, fair_values=fair_values_cache)
+                    last_tape = time.time()
 
                 # Prefetch token_ids for real mode (eliminates per-trade Gamma API latency)
                 if hasattr(trader, 'use_real') and trader.use_real:
@@ -300,6 +304,9 @@ def run():
                         final_mean = p_count + (p_avg_hist / HOURS_PER_DAY * p_hours_left)
                         eff_std = 5.0
                         brain_mode = MODE_TAG_ERROR
+
+                    # Guardar fair value (predicción del modelo) para market_tape
+                    fair_values_cache[m_poly['title']] = round(final_mean, 2)
 
                     print("-" * TABLE_WIDTH)
                     print(f">>> {m_poly['title']}")

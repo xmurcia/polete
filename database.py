@@ -81,7 +81,13 @@ CREATE TABLE IF NOT EXISTS trades (
     strategy    TEXT DEFAULT 'STANDARD', -- STANDARD | MOONSHOT | HEDGE | LOTTO
     hours_left  NUMERIC(8,3),           -- Tiempo restante del mercado en horas
     tweet_count INT,                    -- Conteo actual de tweets
-    market_consensus NUMERIC(10,4)      -- Consenso del mercado (probabilidad)
+    market_consensus NUMERIC(10,4),     -- Consenso del mercado (probabilidad)
+    pos_id              TEXT,                   -- Enlace a la posición (FK → positions.pos_id)
+    entry_signal_reason TEXT,                   -- Motivo explícito de la señal de entrada
+    exit_signal_reason  TEXT,                   -- Motivo explícito de la señal de salida
+    trade_outcome_label TEXT,                   -- Clasificación del resultado (profitable, loss, break_even)
+    external_event_ref  TEXT,                   -- Referencia al evento externo (ej. tweet ID)
+    slippage            NUMERIC(10,4)           -- Slippage: precio ejecutado vs. esperado
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_ts     ON trades (ts DESC);
@@ -89,23 +95,34 @@ CREATE INDEX IF NOT EXISTS idx_trades_action ON trades (action);
 CREATE INDEX IF NOT EXISTS idx_trades_bucket ON trades (bucket);
 CREATE INDEX IF NOT EXISTS idx_trades_hours_left ON trades (hours_left);
 CREATE INDEX IF NOT EXISTS idx_trades_tweet_count ON trades (tweet_count);
+CREATE INDEX IF NOT EXISTS idx_trades_pos_id     ON trades (pos_id);
+CREATE INDEX IF NOT EXISTS idx_trades_outcome    ON trades (trade_outcome_label);
+CREATE INDEX IF NOT EXISTS idx_trades_external   ON trades (external_event_ref);
+CREATE INDEX IF NOT EXISTS idx_trades_slippage   ON trades (slippage);
 
 -- Posiciones abiertas (reemplaza portfolio.json → positions)
 CREATE TABLE IF NOT EXISTS positions (
-    pos_id          TEXT PRIMARY KEY,   -- "{market}|{bucket}"
-    market          TEXT NOT NULL,
-    bucket          TEXT NOT NULL,
-    shares          NUMERIC(12,4) NOT NULL,
-    entry_price     NUMERIC(10,4) NOT NULL,
-    current_price   NUMERIC(10,4),
-    invested        NUMERIC(10,4) NOT NULL,
-    strategy_tag    TEXT DEFAULT 'STANDARD',
-    token_id        TEXT,               -- solo en modo REAL
-    max_price_seen  NUMERIC(10,4),
-    entry_z_score   NUMERIC(10,4),      -- Z-score en el momento de entrada
-    opened_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    mode            TEXT DEFAULT 'PAPER'
+    pos_id              TEXT PRIMARY KEY,   -- "{market}|{bucket}"
+    market              TEXT NOT NULL,
+    bucket              TEXT NOT NULL,
+    shares              NUMERIC(12,4) NOT NULL,
+    entry_price         NUMERIC(10,4) NOT NULL,
+    current_price       NUMERIC(10,4),
+    invested            NUMERIC(10,4) NOT NULL,
+    strategy_tag        TEXT DEFAULT 'STANDARD',
+    token_id            TEXT,               -- solo en modo REAL
+    max_price_seen      NUMERIC(10,4),
+    entry_z_score       NUMERIC(10,4),      -- Z-score en el momento de entrada
+    opened_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    mode                TEXT DEFAULT 'PAPER',
+    realized_pnl        NUMERIC(12,4),      -- PnL realizado al cerrar la posición
+    strategy_tag_detail TEXT,               -- Detalle de parámetros de estrategia
+    last_trade_id       INTEGER,            -- ID del último trade que cerró la posición
+    asset_type          TEXT                -- Tipo de activo (STOCK, CRYPTO, ETF)
 );
+
+CREATE INDEX IF NOT EXISTS idx_positions_realized_pnl ON positions (realized_pnl);
+CREATE INDEX IF NOT EXISTS idx_positions_asset_type   ON positions (asset_type);
 
 -- Estado global del bot (reemplaza portfolio.json → cash)
 CREATE TABLE IF NOT EXISTS bot_state (
@@ -116,12 +133,19 @@ CREATE TABLE IF NOT EXISTS bot_state (
 
 -- Eventos de tweets en tiempo real (reemplaza live_history.json)
 CREATE TABLE IF NOT EXISTS tweet_events (
-    id      SERIAL PRIMARY KEY,
-    ts_ms   BIGINT NOT NULL,            -- timestamp en milisegundos
-    source  TEXT DEFAULT 'live'
+    id           SERIAL PRIMARY KEY,
+    ts_ms        BIGINT NOT NULL,            -- timestamp en milisegundos
+    source       TEXT DEFAULT 'live',
+    tweet_text   TEXT,                       -- Texto completo del tweet
+    sentiment    TEXT,                       -- Sentimiento (positivo, neutral, negativo)
+    tape_id      INTEGER,                   -- Enlace al market_tape asociado (FK → market_tape.id)
+    is_relevant  BOOLEAN DEFAULT FALSE       -- Marca si el tweet fue relevante para el bot
 );
 
-CREATE INDEX IF NOT EXISTS idx_tweet_events_ts ON tweet_events (ts_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_tweet_events_ts   ON tweet_events (ts_ms DESC);
+CREATE INDEX IF NOT EXISTS idx_tweet_sentiment   ON tweet_events (sentiment);
+CREATE INDEX IF NOT EXISTS idx_tweet_tape_id     ON tweet_events (tape_id);
+CREATE INDEX IF NOT EXISTS idx_tweet_is_relevant ON tweet_events (is_relevant);
 
 -- Snapshot de contexto en cada trade (reemplaza logs/snapshots/*.json)
 -- Guarda el z_score y pnl en el momento exacto del trade para análisis posterior
@@ -148,19 +172,23 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_action ON trade_snapshots (action);
 -- Cabecera del tape: un registro por mercado activo por ciclo de tape
 -- (reemplaza logs/market_tape/*.json — guardamos cada 30 min)
 CREATE TABLE IF NOT EXISTS market_tape (
-    id          SERIAL PRIMARY KEY,
-    ts          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    ts_unix     NUMERIC,
-    market      TEXT NOT NULL,
-    tweet_count INT,
-    hours_left  NUMERIC(8,3),
-    daily_avg   NUMERIC(8,3),
-    market_id   TEXT,               -- ID del mercado de Polymarket
-    is_active   BOOLEAN DEFAULT TRUE -- Si el mercado está activo
+    id                  SERIAL PRIMARY KEY,
+    ts                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ts_unix             NUMERIC,
+    market              TEXT NOT NULL,
+    tweet_count         INT,
+    hours_left          NUMERIC(8,3),
+    daily_avg           NUMERIC(8,3),
+    market_id           TEXT,               -- ID del mercado de Polymarket
+    is_active           BOOLEAN DEFAULT TRUE, -- Si el mercado está activo
+    external_event_ref  TEXT,               -- Referencia al evento externo (ej. tweet ID)
+    fair_value          NUMERIC(10,4),      -- Precio justo calculado
+    total_volume        NUMERIC(12,4)       -- Volumen total de órdenes
 );
 
 CREATE INDEX IF NOT EXISTS idx_tape_ts     ON market_tape (ts DESC);
 CREATE INDEX IF NOT EXISTS idx_tape_market ON market_tape (market, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_market_tape_external_ref ON market_tape (external_event_ref);
 
 -- Precios por bucket para cada entrada del tape
 -- Separado para poder hacer: "dame el bid del bucket 300-319 a lo largo del tiempo"
@@ -205,19 +233,32 @@ def log_trade(
     hours_left: Optional[float] = None,
     tweet_count: Optional[int] = None,
     market_consensus: Optional[float] = None,
-):
-    """Guarda un trade. Equivalente a _log_trade() del CSV."""
+    pos_id: Optional[str] = None,
+    entry_signal_reason: Optional[str] = None,
+    exit_signal_reason: Optional[str] = None,
+    trade_outcome_label: Optional[str] = None,
+    external_event_ref: Optional[str] = None,
+    slippage: Optional[float] = None,
+) -> Optional[int]:
+    """Guarda un trade. Equivalente a _log_trade() del CSV. Devuelve el id del trade insertado."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO trades (action, market, bucket, price, shares, reason, pnl, cash_after, mode, strategy,
-                                   hours_left, tweet_count, market_consensus)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                   hours_left, tweet_count, market_consensus,
+                                   pos_id, entry_signal_reason, exit_signal_reason,
+                                   trade_outcome_label, external_event_ref, slippage)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (action, market, bucket, price, shares, reason, pnl, cash_after, mode, strategy,
-                 hours_left, tweet_count, market_consensus),
+                 hours_left, tweet_count, market_consensus,
+                 pos_id, entry_signal_reason, exit_signal_reason,
+                 trade_outcome_label, external_event_ref, slippage),
             )
+            row = cur.fetchone()
+            return row[0] if row else None
 
 
 def get_trades(limit: int = 200, mode: Optional[str] = None) -> list[dict]:
@@ -284,33 +325,43 @@ def upsert_position(pos_id: str, data: dict):
             cur.execute(
                 """
                 INSERT INTO positions (pos_id, market, bucket, shares, entry_price, current_price,
-                    invested, strategy_tag, token_id, max_price_seen, mode, entry_z_score)
+                    invested, strategy_tag, token_id, max_price_seen, mode, entry_z_score,
+                    realized_pnl, strategy_tag_detail, last_trade_id, asset_type)
                 VALUES (%(pos_id)s, %(market)s, %(bucket)s, %(shares)s, %(entry_price)s,
                     %(current_price)s, %(invested)s, %(strategy_tag)s, %(token_id)s,
-                    %(max_price_seen)s, %(mode)s, %(entry_z_score)s)
+                    %(max_price_seen)s, %(mode)s, %(entry_z_score)s,
+                    %(realized_pnl)s, %(strategy_tag_detail)s, %(last_trade_id)s, %(asset_type)s)
                 ON CONFLICT (pos_id) DO UPDATE SET
-                    shares          = EXCLUDED.shares,
-                    entry_price     = EXCLUDED.entry_price,
-                    current_price   = EXCLUDED.current_price,
-                    invested        = EXCLUDED.invested,
-                    strategy_tag    = EXCLUDED.strategy_tag,
-                    token_id        = EXCLUDED.token_id,
-                    max_price_seen  = EXCLUDED.max_price_seen,
-                    entry_z_score   = EXCLUDED.entry_z_score
+                    shares              = EXCLUDED.shares,
+                    entry_price         = EXCLUDED.entry_price,
+                    current_price       = EXCLUDED.current_price,
+                    invested            = EXCLUDED.invested,
+                    strategy_tag        = EXCLUDED.strategy_tag,
+                    token_id            = EXCLUDED.token_id,
+                    max_price_seen      = EXCLUDED.max_price_seen,
+                    entry_z_score       = EXCLUDED.entry_z_score,
+                    realized_pnl        = COALESCE(EXCLUDED.realized_pnl, positions.realized_pnl),
+                    strategy_tag_detail = COALESCE(EXCLUDED.strategy_tag_detail, positions.strategy_tag_detail),
+                    last_trade_id       = COALESCE(EXCLUDED.last_trade_id, positions.last_trade_id),
+                    asset_type          = COALESCE(EXCLUDED.asset_type, positions.asset_type)
                 """,
                 {
-                    "pos_id":        pos_id,
-                    "market":        data.get("market", ""),
-                    "bucket":        data.get("bucket", ""),
-                    "shares":        data.get("shares", 0),
-                    "entry_price":   data.get("entry_price", 0),
-                    "current_price": data.get("current_price", data.get("entry_price", 0)),
-                    "invested":      data.get("invested", 0),
-                    "strategy_tag":  data.get("strategy_tag", "STANDARD"),
-                    "token_id":      data.get("token_id"),
-                    "max_price_seen":data.get("max_price_seen"),
-                    "mode":          data.get("mode", "PAPER"),
-                    "entry_z_score": data.get("entry_z_score"),
+                    "pos_id":              pos_id,
+                    "market":              data.get("market", ""),
+                    "bucket":              data.get("bucket", ""),
+                    "shares":              data.get("shares", 0),
+                    "entry_price":         data.get("entry_price", 0),
+                    "current_price":       data.get("current_price", data.get("entry_price", 0)),
+                    "invested":            data.get("invested", 0),
+                    "strategy_tag":        data.get("strategy_tag", "STANDARD"),
+                    "token_id":            data.get("token_id"),
+                    "max_price_seen":      data.get("max_price_seen"),
+                    "mode":                data.get("mode", "PAPER"),
+                    "entry_z_score":       data.get("entry_z_score"),
+                    "realized_pnl":        data.get("realized_pnl"),
+                    "strategy_tag_detail": data.get("strategy_tag_detail"),
+                    "last_trade_id":       data.get("last_trade_id"),
+                    "asset_type":          data.get("asset_type"),
                 },
             )
 
@@ -319,6 +370,22 @@ def delete_position(pos_id: str):
     """Elimina una posición (al cerrarla)."""
     with get_conn() as conn:
         with conn.cursor() as cur:
+            cur.execute("DELETE FROM positions WHERE pos_id = %s", (pos_id,))
+
+
+def close_position(pos_id: str, realized_pnl: float, last_trade_id: Optional[int] = None):
+    """Actualiza realized_pnl y last_trade_id antes de eliminar la posición.
+    Permite auditoría: qué trade cerró la posición y cuánto P&L generó."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE positions
+                SET realized_pnl = %s, last_trade_id = %s
+                WHERE pos_id = %s
+                """,
+                (realized_pnl, last_trade_id, pos_id),
+            )
             cur.execute("DELETE FROM positions WHERE pos_id = %s", (pos_id,))
 
 
@@ -367,13 +434,22 @@ def get_state(key: str, default=None):
 # TWEET EVENTS (reemplaza live_history.json)
 # ──────────────────────────────────────────────────────────────
 
-def insert_tweet_event(ts_ms: int):
-    """Registra un nuevo evento de tweet."""
+def insert_tweet_event(
+    ts_ms: int,
+    tweet_text: Optional[str] = None,
+    sentiment: Optional[str] = None,
+    tape_id: Optional[int] = None,
+    is_relevant: bool = False,
+):
+    """Registra un nuevo evento de tweet con metadata opcional."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO tweet_events (ts_ms) VALUES (%s)",
-                (ts_ms,),
+                """
+                INSERT INTO tweet_events (ts_ms, tweet_text, sentiment, tape_id, is_relevant)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (ts_ms, tweet_text, sentiment, tape_id, is_relevant),
             )
 
 
@@ -406,14 +482,16 @@ def shadow_write(fn, *args, **kwargs):
     Envuelve cualquier función de escritura en DB para que un fallo
     nunca interrumpa el flujo del bot.
     Los ficheros siguen siendo la fuente de verdad durante la transición.
+    Devuelve el resultado de fn() si es exitoso, None si falla o DB no disponible.
     """
     if not is_db_available():
-        return  # Dual-write desactivado, skip silenciosamente
+        return None  # Dual-write desactivado, skip silenciosamente
 
     try:
-        fn(*args, **kwargs)
+        return fn(*args, **kwargs)
     except Exception as e:
         print(f"⚠️  [DB shadow] {fn.__name__}: {e}")
+        return None
 
 
 # ──────────────────────────────────────────────────────────────
@@ -492,15 +570,21 @@ def get_snapshots(limit: int = 100, action: Optional[str] = None) -> list[dict]:
 # MARKET TAPE (reemplaza logs/market_tape/*.json)
 # ──────────────────────────────────────────────────────────────
 
-def save_tape(ts_unix: float, meta: list, order_book: list):
+def save_tape(ts_unix: float, meta: list, order_book: list,
+              external_event_ref: Optional[str] = None,
+              fair_values: Optional[dict] = None,
+              total_volumes: Optional[dict] = None):
     """
     Persiste un snapshot del order book completo.
     Llamar donde antes se llamaba save_market_tape().
 
     Args:
-        ts_unix:    timestamp unix del snapshot (float)
-        meta:       lista de dicts con {id, title, count, hours, daily_avg}
-        order_book: lista de dicts con {title, buckets: [{bucket, min, max, bid, ask}]}
+        ts_unix:            timestamp unix del snapshot (float)
+        meta:               lista de dicts con {id, title, count, hours, daily_avg}
+        order_book:         lista de dicts con {title, buckets: [{bucket, min, max, bid, ask}]}
+        external_event_ref: referencia a evento externo que generó el snapshot (ej. tweet ID)
+        fair_values:        dict {market_title: fair_value} precios justos calculados
+        total_volumes:      dict {market_title: volume} volumen total de órdenes
     """
     # Construir mapa title → meta para enriquecer cada fila del tape
     meta_map = {m["title"].strip().lower(): m for m in meta}
@@ -526,14 +610,20 @@ def save_tape(ts_unix: float, meta: list, order_book: list):
                 market_id   = market_meta["id"] if market_meta else None
                 is_active   = market_meta.get("active", True) if market_meta else True
 
+                # Nuevas columnas opcionales
+                fair_value   = fair_values.get(market_title) if fair_values else None
+                total_volume = total_volumes.get(market_title) if total_volumes else None
+
                 # Insertar cabecera del tape
                 cur.execute(
                     """
-                    INSERT INTO market_tape (ts_unix, market, tweet_count, hours_left, daily_avg, market_id, is_active)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO market_tape (ts_unix, market, tweet_count, hours_left, daily_avg, market_id, is_active,
+                                           external_event_ref, fair_value, total_volume)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (ts_unix, market_title, tweet_count, hours_left, daily_avg, market_id, is_active),
+                    (ts_unix, market_title, tweet_count, hours_left, daily_avg, market_id, is_active,
+                     external_event_ref, fair_value, total_volume),
                 )
                 tape_id = cur.fetchone()[0]
 
