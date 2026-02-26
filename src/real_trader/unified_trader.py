@@ -157,7 +157,8 @@ class UnifiedTrader:
         hours_left: Optional[float] = None,
         tweet_count: Optional[int] = None,
         market_consensus: Optional[float] = None,
-        entry_z_score: Optional[float] = None
+        entry_z_score: Optional[float] = None,
+        tick_size: str = "0.01"
     ) -> Optional[str]:
         """
         Execute a trade (paper or real).
@@ -169,6 +170,7 @@ class UnifiedTrader:
             price: Price to execute at
             reason: Reason for the trade
             strategy_tag: "STANDARD", "MOONSHOT", "LOTTO", "HEDGE"
+            tick_size: Minimum tick size for this market (e.g., "0.01")
 
         Returns:
             Result message or None
@@ -181,7 +183,8 @@ class UnifiedTrader:
             except RuntimeError:
                 return asyncio.run(self._execute_real(
                     market_title, bucket, signal, price, reason, strategy_tag,
-                    hours_left, tweet_count, market_consensus, entry_z_score
+                    hours_left, tweet_count, market_consensus, entry_z_score,
+                    tick_size
                 ))
         else:
             # Paper mode - PaperTrader handles its own logging
@@ -201,7 +204,8 @@ class UnifiedTrader:
         hours_left: Optional[float] = None,
         tweet_count: Optional[int] = None,
         market_consensus: Optional[float] = None,
-        entry_z_score: Optional[float] = None
+        entry_z_score: Optional[float] = None,
+        tick_size: str = "0.01"
     ) -> Optional[str]:
         """Execute real trade on blockchain"""
 
@@ -289,7 +293,8 @@ class UnifiedTrader:
                 event_slug=market_title,
                 range_label=bucket,
                 market_title=market_title,
-                token_side="YES"
+                token_side="YES",
+                tick_size=tick_size
             )
 
             result = await self.order_mgr.place_order(order_request)
@@ -308,7 +313,8 @@ class UnifiedTrader:
                     event_slug=market_title,
                     range_label=bucket,
                     market_title=market_title,
-                    token_side="YES"
+                    token_side="YES",
+                    tick_size=tick_size
                 )
 
                 result = await self.order_mgr.place_order(order_request_gtc)
@@ -502,6 +508,16 @@ class UnifiedTrader:
                             break
                     break
 
+            # Get tick_size for this bucket from order book scan (may differ from parameter)
+            sell_tick_size = tick_size
+            for market_ob in order_book:
+                if market_title.lower() in market_ob.get("title", "").lower():
+                    for b in market_ob.get("buckets", []):
+                        if b.get("bucket") == bucket:
+                            sell_tick_size = b.get("tick_size", tick_size)
+                            break
+                    break
+
             # Strategy 1: Try FOK at BID price (conservative - best execution price)
             print(f"[UnifiedTrader] 🎯 Strategy 1/3: FOK @ BID ${price:.3f}")
             order_request_fok_bid = OrderRequest(
@@ -513,7 +529,8 @@ class UnifiedTrader:
                 event_slug=position.event_slug,
                 range_label=position.range_label,
                 market_title=market_title,
-                token_side=position.token_side
+                token_side=position.token_side,
+                tick_size=sell_tick_size
             )
 
             result = await self.order_mgr.place_order(order_request_fok_bid)
@@ -536,7 +553,8 @@ class UnifiedTrader:
                     event_slug=position.event_slug,
                     range_label=position.range_label,
                     market_title=market_title,
-                    token_side=position.token_side
+                    token_side=position.token_side,
+                    tick_size=sell_tick_size
                 )
 
                 result = await self.order_mgr.place_order(order_request_fok_ask)
@@ -560,7 +578,8 @@ class UnifiedTrader:
                     event_slug=position.event_slug,
                     range_label=position.range_label,
                     market_title=market_title,
-                    token_side=position.token_side
+                    token_side=position.token_side,
+                    tick_size=sell_tick_size
                 )
 
                 result = await self.order_mgr.place_order(order_request_gtc)

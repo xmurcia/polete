@@ -33,6 +33,7 @@ class OrderRequest:
     market_title: str = ""
     token_side: str = ""  # "YES" or "NO"
     is_stop_loss: bool = False
+    tick_size: str = "0.01"  # Minimum tick size for this market
 
 
 @dataclass

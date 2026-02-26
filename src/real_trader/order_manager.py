@@ -106,9 +106,8 @@ class OrderManager:
 
             # Use create_market_order for FOK/IOC (handles precision internally)
             if request.order_type.value in ["FOK", "IOC"]:
-                # Determine tick_size based on price (Polymarket convention)
-                # High price (>$0.10): 0.01, Low price (≤$0.10): 0.001
-                tick_size = "0.01" if price > 0.10 else "0.001"
+                # Use market's actual tick_size from the request (fetched from Gamma API)
+                tick_size = getattr(request, 'tick_size', None) or ("0.01" if price > 0.10 else "0.001")
 
                 # Round price to tick_size precision
                 tick_decimals = 2 if tick_size == "0.01" else 3

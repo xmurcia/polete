@@ -162,5 +162,6 @@ def _ejecutar_hedge(trader, m_poly, clob_buckets, target_match_func, reason_tag,
                     hours_left=p_hours_left,
                     tweet_count=current_count,
                     market_consensus=None,
-                    entry_z_score=None
+                    entry_z_score=None,
+                    tick_size=candidate.get('tick_size', '0.01')
                 )
