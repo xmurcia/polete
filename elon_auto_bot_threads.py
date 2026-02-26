@@ -126,8 +126,9 @@ def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p
         if candidates:
             candidates.sort(key=lambda x: x['dist'])
             best = candidates[0]
-            print(f"    🛰️ MOONSHOT OPORTUNIDAD: {best['bucket']['bucket']} @ ${best['ask']:.2f}")
-            trader.execute(m_poly['title'], best['bucket']['bucket'], "BUY", best['ask'], "Moonshot V33", strategy_tag="MOONSHOT")
+            moonshot_price = round_to_tick(best['ask'], best['bucket'].get('min_tick', 0.01))
+            print(f"    🛰️ MOONSHOT OPORTUNIDAD: {best['bucket']['bucket']} @ ${moonshot_price:.2f}")
+            trader.execute(m_poly['title'], best['bucket']['bucket'], "BUY", moonshot_price, "Moonshot V33", strategy_tag="MOONSHOT")
             time.sleep(1.0)
 
     except Exception as e: pass
@@ -183,7 +184,8 @@ class ClobMarketScanner:
                     try:
                         t_ids = json.loads(m['clobTokenIds'])
                         yes_token = t_ids[0]
-                        buckets_list.append({'bucket': b_name, 'min': min_v, 'max': max_v, 'token': yes_token})
+                        min_tick = float(m.get('orderPriceMinTickSize') or 0.01)
+                        buckets_list.append({'bucket': b_name, 'min': min_v, 'max': max_v, 'token': yes_token, 'min_tick': min_tick})
                         tokens_to_fetch.append({"token_id": yes_token, "side": "BUY"})
                         tokens_to_fetch.append({"token_id": yes_token, "side": "SELL"})
                     except: continue
@@ -211,7 +213,8 @@ class ClobMarketScanner:
                     precios = price_map.get(b['token'], {})
                     clean_buckets.append({
                         'bucket': b['bucket'], 'min': b['min'], 'max': b['max'],
-                        'ask': precios.get('sell', 0.0), 'bid': precios.get('buy', 0.0)
+                        'ask': precios.get('sell', 0.0), 'bid': precios.get('buy', 0.0),
+                        'min_tick': b.get('min_tick', 0.01)
                     })
                 final_data.append({'title': mkt['title'], 'buckets': clean_buckets})
 
@@ -640,6 +643,15 @@ def _ejecutar_hedge(trader, m_poly, clob_buckets, target_match_func, reason_tag)
                 )
 
 # ==========================================
+# UTILIDAD: REDONDEO AL TICK MÍNIMO
+# ==========================================
+def round_to_tick(price, tick_size):
+    """Redondea el precio al tick mínimo permitido por el mercado."""
+    if not tick_size or tick_size <= 0:
+        return price
+    return round(round(price / tick_size) * tick_size, 10)
+
+# ==========================================
 # 6. DIRECTOR (V12.16 - ACCUMULATION RESTORED)
 # ==========================================
 def run():
@@ -840,7 +852,8 @@ def run():
                             if datetime.now() < stop_loss_cooldowns[b['bucket']]: continue
                             else: del stop_loss_cooldowns[b['bucket']]
                         
-                        bid, ask = b.get('bid',0), b.get('ask',0)
+                        tick = b.get('min_tick', 0.01)
+                        bid, ask = round_to_tick(b.get('bid', 0), tick), round_to_tick(b.get('ask', 0), tick)
 
                         if bid <= 0.001 and p_hours_left > 2.0: continue 
                         

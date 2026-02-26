@@ -153,15 +153,17 @@ class ClobMarketScanner:
                     try:
                         t_ids = json.loads(m['clobTokenIds'])
                         yes_token = t_ids[0]
+                        min_tick = float(m.get('orderPriceMinTickSize') or 0.01)
                         buckets_list.append({
-                            'bucket': b_name, 'min': min_v, 'max': max_v, 'token': yes_token
+                            'bucket': b_name, 'min': min_v, 'max': max_v, 'token': yes_token,
+                            'min_tick': min_tick
                         })
-                        
+
                         # --- PREPARACIÓN BULK ---
                         # En lugar de crear tareas, añadimos a la lista de petición
                         tokens_to_fetch.append({"token_id": yes_token, "side": "BUY"})  # Bid
                         tokens_to_fetch.append({"token_id": yes_token, "side": "SELL"}) # Ask
-                        
+
                     except: continue
                 
                 if buckets_list:
@@ -201,7 +203,8 @@ class ClobMarketScanner:
                         'min': b['min'],
                         'max': b['max'],
                         'ask': precios.get('sell', 0.0),
-                        'bid': precios.get('buy', 0.0)
+                        'bid': precios.get('buy', 0.0),
+                        'min_tick': b.get('min_tick', 0.01)
                     })
                 final_data.append({'title': mkt['title'], 'buckets': clean_buckets})
 
@@ -842,6 +845,15 @@ class MarketPanicSensor:
         return alerts
 
 # ==========================================
+# UTILIDAD: REDONDEO AL TICK MÍNIMO
+# ==========================================
+def round_to_tick(price, tick_size):
+    """Redondea el precio al tick mínimo permitido por el mercado."""
+    if not tick_size or tick_size <= 0:
+        return price
+    return round(round(price / tick_size) * tick_size, 10)
+
+# ==========================================
 # 6. DIRECTOR DE ORQUESTA V9.3 (NUCLEAR SAFETY FINAL)
 # ==========================================
 def run():
@@ -1244,7 +1256,8 @@ def run():
 
                         # --- EJECUCIÓN ---
                         if should_sell:
-                            trade_res = trader.execute(m_poly['title'], t_slug, action_tag, current_bid, reason=reason_tag)
+                            sell_price = round_to_tick(current_bid, b.get('min_tick', 0.01))
+                            trade_res = trader.execute(m_poly['title'], t_slug, action_tag, sell_price, reason=reason_tag)
                             if trade_res:
                                 print(f"{t_slug:<10} | {current_bid:.3f}    | {current_ask:.3f}    | {'-':<8} | {action_tag:<10} | {reason_tag}")
                                 context = {
@@ -1344,11 +1357,12 @@ def run():
                     if current_ask > 0.01 or fair_val > 0.01 or special_tag or "EXIT" in action:
                         print(f"{b['bucket']:<10} | {current_bid:.3f}    | {current_ask:.3f}    | {fair_val:.3f}    | {action:<10} | {reason}")
 
-                    if action != "-": 
+                    if action != "-":
                         raw_act = action.split()[1] if " " in action else action
                         trade_act = special_tag if special_tag else ("SELL" if "DUMP" in action else raw_act)
-                        price = current_ask if "BUY" in trade_act else current_bid
-                        
+                        raw_price = current_ask if "BUY" in trade_act else current_bid
+                        price = round_to_tick(raw_price, b.get('min_tick', 0.01))
+
                         trade_res = trader.execute(m_poly['title'], b['bucket'], trade_act, price, reason=reason)
                         
                         if trade_res: 
