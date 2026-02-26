@@ -11,8 +11,17 @@ try:
 except ImportError:
     DB_AVAILABLE = False
 
-def save_market_tape(clob_data, markets_meta):
-    """Save market tape snapshot to disk (and optionally to DB)"""
+def save_market_tape(clob_data, markets_meta, external_event_ref=None,
+                     fair_values=None, total_volumes=None):
+    """Save market tape snapshot to disk (and optionally to DB)
+
+    Args:
+        clob_data:          order book data from CLOB scanner
+        markets_meta:       market metadata from sensor
+        external_event_ref: referencia a evento externo (ej. tweet ID)
+        fair_values:        dict {market_title: fair_value} precios justos
+        total_volumes:      dict {market_title: volume} volúmenes totales
+    """
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     ts_unix = time.time()
 
@@ -26,7 +35,10 @@ def save_market_tape(clob_data, markets_meta):
             db.save_tape,
             ts_unix=ts_unix,
             meta=markets_meta,
-            order_book=clob_data
+            order_book=clob_data,
+            external_event_ref=external_event_ref,
+            fair_values=fair_values,
+            total_volumes=total_volumes
         )
 
 def save_trade_snapshot(action, m_title, bucket, price, reason, ctx, hours_left=None, tweet_count=None, mode="PAPER"):
