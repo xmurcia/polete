@@ -70,7 +70,7 @@ def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p
             print(f"    🛰️ MOONSHOT OPORTUNIDAD: {best['bucket']['bucket']} @ ${best['ask']:.2f}")
             trader.execute(m_poly['title'], best['bucket']['bucket'], "BUY", best['ask'], "Moonshot V33",
                           strategy_tag="MOONSHOT", hours_left=p_hours_left, tweet_count=p_count,
-                          market_consensus=None, entry_z_score=None)
+                          market_consensus=None, entry_z_score=None, tick_size=best['bucket'].get('tick_size'))
             time.sleep(1.0)
 
     except Exception as e: pass

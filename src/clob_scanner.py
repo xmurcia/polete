@@ -52,7 +52,9 @@ class ClobMarketScanner:
                     try:
                         t_ids = json.loads(m['clobTokenIds'])
                         yes_token = t_ids[0]
-                        buckets_list.append({'bucket': b_name, 'min': min_v, 'max': max_v, 'token': yes_token})
+                        ts = m.get('orderPriceMinTickSize')
+                        tick_size = f"{float(ts):g}" if ts is not None else None
+                        buckets_list.append({'bucket': b_name, 'min': min_v, 'max': max_v, 'token': yes_token, 'tick_size': tick_size})
                         tokens_to_fetch.append({"token_id": yes_token, "side": "BUY"})
                         tokens_to_fetch.append({"token_id": yes_token, "side": "SELL"})
                     except: continue
@@ -80,7 +82,8 @@ class ClobMarketScanner:
                     precios = price_map.get(b['token'], {})
                     clean_buckets.append({
                         'bucket': b['bucket'], 'min': b['min'], 'max': b['max'],
-                        'ask': precios.get('sell', 0.0), 'bid': precios.get('buy', 0.0)
+                        'ask': precios.get('sell', 0.0), 'bid': precios.get('buy', 0.0),
+                    'tick_size': b.get('tick_size')
                     })
                 final_data.append({'title': mkt['title'], 'buckets': clean_buckets})
 

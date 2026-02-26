@@ -73,6 +73,9 @@ class UnifiedTrader:
         # Forward token_id cache: "market_title|bucket" → token_id  [for fast BUY resolution]
         self._token_id_forward_cache: Dict[str, str] = {}
 
+        # Tick size cache: "market_title|bucket" → tick_size string (e.g. "0.01")
+        self._tick_size_cache: Dict[str, str] = {}
+
         # Position sync cache to avoid excessive API calls
         self._last_position_sync = 0  # timestamp
         self._position_sync_interval = 5  # seconds
@@ -157,7 +160,8 @@ class UnifiedTrader:
         hours_left: Optional[float] = None,
         tweet_count: Optional[int] = None,
         market_consensus: Optional[float] = None,
-        entry_z_score: Optional[float] = None
+        entry_z_score: Optional[float] = None,
+        tick_size: Optional[str] = None
     ) -> Optional[str]:
         """
         Execute a trade (paper or real).
@@ -169,6 +173,7 @@ class UnifiedTrader:
             price: Price to execute at
             reason: Reason for the trade
             strategy_tag: "STANDARD", "MOONSHOT", "LOTTO", "HEDGE"
+            tick_size: Market's minimum tick size (e.g. "0.01" or "0.001")
 
         Returns:
             Result message or None
@@ -181,7 +186,7 @@ class UnifiedTrader:
             except RuntimeError:
                 return asyncio.run(self._execute_real(
                     market_title, bucket, signal, price, reason, strategy_tag,
-                    hours_left, tweet_count, market_consensus, entry_z_score
+                    hours_left, tweet_count, market_consensus, entry_z_score, tick_size
                 ))
         else:
             # Paper mode - PaperTrader handles its own logging
@@ -201,7 +206,8 @@ class UnifiedTrader:
         hours_left: Optional[float] = None,
         tweet_count: Optional[int] = None,
         market_consensus: Optional[float] = None,
-        entry_z_score: Optional[float] = None
+        entry_z_score: Optional[float] = None,
+        tick_size: Optional[str] = None
     ) -> Optional[str]:
         """Execute real trade on blockchain"""
 
@@ -278,6 +284,10 @@ class UnifiedTrader:
                 return None
 
             # 5. Create and place order with fallback (FOK → GTC)
+            # Resolve tick_size: use passed value, then cache, then None (order_manager fallback)
+            cache_key = f"{market_title}|{bucket}"
+            resolved_tick_size = tick_size or self._tick_size_cache.get(cache_key)
+
             # Strategy 1: FOK (Fill or Kill) - immediate execution
             print(f"[UnifiedTrader] 🎯 BUY Strategy 1/2: FOK @ ${price:.3f}")
             order_request = OrderRequest(
@@ -289,7 +299,8 @@ class UnifiedTrader:
                 event_slug=market_title,
                 range_label=bucket,
                 market_title=market_title,
-                token_side="YES"
+                token_side="YES",
+                tick_size=resolved_tick_size
             )
 
             result = await self.order_mgr.place_order(order_request)
@@ -308,7 +319,8 @@ class UnifiedTrader:
                     event_slug=market_title,
                     range_label=bucket,
                     market_title=market_title,
-                    token_side="YES"
+                    token_side="YES",
+                    tick_size=resolved_tick_size
                 )
 
                 result = await self.order_mgr.place_order(order_request_gtc)
@@ -737,6 +749,12 @@ class UnifiedTrader:
                             token_id = str(clob_token_ids[0])  # YES token
                             cache_key = f"{market_title}|{bucket}"
                             self._token_id_forward_cache[cache_key] = token_id
+
+                            # Cache tick size from market data
+                            ts = market.get("orderPriceMinTickSize")
+                            if ts is not None:
+                                self._tick_size_cache[cache_key] = f"{float(ts):g}"
+
                             resolved_count += 1
                         break
 
@@ -884,7 +902,14 @@ class UnifiedTrader:
                         token_id = clob_token_ids[token_index] if len(clob_token_ids) > token_index else clob_token_ids[0]
 
                         token_id = str(token_id)
-                        self._token_id_forward_cache[f"{market_title}|{bucket}"] = token_id
+                        cache_key = f"{market_title}|{bucket}"
+                        self._token_id_forward_cache[cache_key] = token_id
+
+                        # Cache tick size from market data
+                        ts = market.get("orderPriceMinTickSize")
+                        if ts is not None:
+                            self._tick_size_cache[cache_key] = f"{float(ts):g}"
+
                         print(f"[UnifiedTrader] ✅ Resolved token: {bucket} → {token_id[:20]}...")
                         return token_id
 
