@@ -131,7 +131,7 @@ CLUSTER_MULTIPLIER_SHORT_LATE = 1.0    # ≤24h remaining: Allow 1.0 buckets apa
 WARMUP_MIN_TWEETS_LONG = 20
 
 # Minimum tweet count before allowing trades on short events (<72h)
-WARMUP_MIN_TWEETS_SHORT = 8
+WARMUP_MIN_TWEETS_SHORT = 35
 
 # Minimum historical events needed for valid Hawkes predictions
 WARMUP_MIN_HISTORY_COUNT = 5

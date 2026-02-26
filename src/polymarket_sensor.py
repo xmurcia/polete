@@ -30,10 +30,19 @@ class PolymarketSensor:
             daily_avg = 0.0
             if days_elapsed > 0: daily_avg = count / days_elapsed
 
+            total_hours = 0.0
+            start_str = t.get('startDate')
+            if start_str and end_date_str:
+                try:
+                    start_dt = dateutil.parser.isoparse(start_str)
+                    end_dt = dateutil.parser.isoparse(end_date_str)
+                    total_hours = (end_dt - start_dt).total_seconds() / SECONDS_PER_HOUR
+                except: pass
+
             if hours > -2.0:
                 return {
                     'id': t['id'], 'title': t['title'], 'count': count, 'hours': hours,
-                    'daily_avg': daily_avg, 'active': True
+                    'daily_avg': daily_avg, 'active': True, 'total_hours': total_hours
                 }
         except: pass
         return None
