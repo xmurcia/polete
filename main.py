@@ -584,7 +584,7 @@ def run():
                                                 res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason,
                                                                     strategy_tag='STANDARD', hours_left=p_hours_left,
                                                                     tweet_count=p_count, market_consensus=consensus,
-                                                                    entry_z_score=z_score)
+                                                                    entry_z_score=z_score, tick_size=b.get('tick_size'))
                                                 if res:
                                                     save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair}, hours_left=p_hours_left, tweet_count=p_count)
                                                     executed_trades_this_cycle.add(trade_key)  # Mark as executed
