@@ -510,6 +510,10 @@ def run():
                             bucket_headroom = b['max'] - m_poly['count']
                             hours_left = m_poly['hours']
 
+                            # Guard: long events (>72h total) → only enter in final 72h
+                            total_duration = m_poly.get('total_hours', 0)
+                            if total_duration > TIME_REMAINING_HOURS_MARATHON and hours_left > TIME_REMAINING_HOURS_MARATHON:
+                                continue
 
                             if hours_left > TIME_REMAINING_HOURS_RUN: base_threshold = PROXIMITY_BASE_THRESHOLD_LONG
 
