@@ -1,7 +1,7 @@
 import requests
 import pandas as pd
 import dateutil.parser
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import *
 
@@ -20,6 +20,10 @@ class PolymarketSensor:
             if end_date_str:
                 try:
                     original_dt = dateutil.parser.isoparse(end_date_str)
+                    # Polymarket stores end dates as midnight UTC of the *following* day
+                    # (e.g. "Feb 27" market → "2026-02-28T00:00:00Z"). Subtract 1 day first.
+                    if original_dt.hour == 0 and original_dt.minute == 0 and original_dt.second == 0:
+                        original_dt = original_dt - timedelta(days=1)
                     fixed_end_date = original_dt.replace(hour=END_DATE_FIXED_HOUR, minute=END_DATE_FIXED_MINUTE,
                                                           second=END_DATE_FIXED_SECOND, microsecond=0, tzinfo=timezone.utc)
                     hours = (fixed_end_date - now).total_seconds() / SECONDS_PER_HOUR
@@ -36,6 +40,10 @@ class PolymarketSensor:
                 try:
                     start_dt = dateutil.parser.isoparse(start_str)
                     end_dt = dateutil.parser.isoparse(end_date_str)
+                    if end_dt.hour == 0 and end_dt.minute == 0 and end_dt.second == 0:
+                        end_dt = end_dt - timedelta(days=1)
+                    end_dt = end_dt.replace(hour=END_DATE_FIXED_HOUR, minute=END_DATE_FIXED_MINUTE,
+                                            second=END_DATE_FIXED_SECOND, microsecond=0, tzinfo=timezone.utc)
                     total_hours = (end_dt - start_dt).total_seconds() / SECONDS_PER_HOUR
                 except: pass
 
