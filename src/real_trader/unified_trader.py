@@ -507,15 +507,21 @@ class UnifiedTrader:
             scanner = ClobMarketScanner()
             order_book = scanner.get_market_prices()
 
-            # Find ask price for this bucket
+            # Find ask price and tick_size for this bucket
             ask_price = None
+            ob_tick_size = None
             for market_ob in order_book:
                 if market_title.lower() in market_ob.get("title", "").lower():
                     for b in market_ob.get("buckets", []):
                         if b.get("bucket") == bucket:
                             ask_price = b.get("ask")
+                            ob_tick_size = b.get("tick_size")
                             break
                     break
+
+            # Resolve tick_size: passed parameter → order book → cache → None (OrderManager fallback)
+            cache_key = f"{market_title}|{bucket}"
+            resolved_sell_tick_size = tick_size or ob_tick_size or self._tick_size_cache.get(cache_key)
 
             # Strategy 1: Try FOK at BID price (conservative - best execution price)
             print(f"[UnifiedTrader] 🎯 Strategy 1/3: FOK @ BID ${price:.3f}")
@@ -528,7 +534,8 @@ class UnifiedTrader:
                 event_slug=position.event_slug,
                 range_label=position.range_label,
                 market_title=market_title,
-                token_side=position.token_side
+                token_side=position.token_side,
+                tick_size=resolved_sell_tick_size
             )
 
             result = await self.order_mgr.place_order(order_request_fok_bid)
@@ -551,7 +558,8 @@ class UnifiedTrader:
                     event_slug=position.event_slug,
                     range_label=position.range_label,
                     market_title=market_title,
-                    token_side=position.token_side
+                    token_side=position.token_side,
+                    tick_size=resolved_sell_tick_size
                 )
 
                 result = await self.order_mgr.place_order(order_request_fok_ask)
@@ -575,7 +583,8 @@ class UnifiedTrader:
                     event_slug=position.event_slug,
                     range_label=position.range_label,
                     market_title=market_title,
-                    token_side=position.token_side
+                    token_side=position.token_side,
+                    tick_size=resolved_sell_tick_size
                 )
 
                 result = await self.order_mgr.place_order(order_request_gtc)
