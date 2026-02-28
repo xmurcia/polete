@@ -107,7 +107,7 @@ class OrderManager:
             # Use create_market_order for FOK/IOC (handles precision internally)
             if request.order_type.value in ["FOK", "IOC"]:
                 # Use market's actual tick size from orderPriceMinTickSize, fallback to price heuristic
-                tick_size = request.tick_size if request.tick_size else ("0.01" if price > 0.10 else "0.001")
+                tick_size = request.tick_size if request.tick_size else ("0.01" if price >= 0.10 else "0.001")
 
                 # Round price to tick_size precision
                 tick_decimals = 2 if tick_size == "0.01" else 3
