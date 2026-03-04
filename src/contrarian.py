@@ -10,8 +10,7 @@ from config import (
 
 
 def ejecutar_contrarian(trader, m_poly, m_clob, final_mean, eff_std, consensus,
-                        p_count, p_hours_left, p_avg_hist, alerts,
-                        stop_loss_cooldowns, contrarian_cooldowns,
+                        p_count, p_hours_left, stop_loss_cooldowns,
                         executed_trades_this_cycle):
     """Entra en eventos nuevos con curva plana, aguanta hasta resolución."""
     try:
@@ -27,13 +26,23 @@ def ejecutar_contrarian(trader, m_poly, m_clob, final_mean, eff_std, consensus,
         if max_bid >= CONTRARIAN_FLAT_CURVE_MAX_BID:
             return
 
+        # Cachear portfolio una sola vez
+        positions = trader.get_portfolio().get('positions', {})
+
         # Cuántas posiciones CONTRARIAN ya tenemos en este mercado
         contrarian_count = sum(
-            1 for pos in trader.get_portfolio().get('positions', {}).values()
+            1 for pos in positions.values()
             if pos.get('strategy_tag') == 'CONTRARIAN'
             and pos.get('market', '') == m_poly['title']
         )
         if contrarian_count >= CONTRARIAN_MAX_CONCURRENT:
+            return
+
+        # Hoist: decay es constante para todo el mercado (p_hours_left no cambia por bucket)
+        decay_factor = (p_hours_left / SIGMA_DECAY_BASE_HOURS) ** 0.5
+        decay_factor = max(SIGMA_DECAY_FACTOR_MIN, min(SIGMA_DECAY_FACTOR_MAX, decay_factor))
+        decayed_std = eff_std * decay_factor
+        if decayed_std <= 0:
             return
 
         for b in all_buckets:
@@ -44,28 +53,24 @@ def ejecutar_contrarian(trader, m_poly, m_clob, final_mean, eff_std, consensus,
             if ask < MIN_PRICE_ENTRY or ask > CONTRARIAN_MAX_PRICE_ENTRY:
                 continue
 
+            if b['bucket'] in stop_loss_cooldowns:
+                continue
+
             pos_id = f"{m_poly['title']}|{b['bucket']}"
-            if pos_id in trader.get_portfolio().get('positions', {}):
+            if pos_id in positions:
                 continue
 
             trade_key = (m_poly['title'], b['bucket'], "BUY")
             if trade_key in executed_trades_this_cycle:
                 continue
 
-            bucket_headroom = b['max'] - p_count
-            if bucket_headroom < CONTRARIAN_MIN_HEADROOM:
+            if b['max'] - p_count < CONTRARIAN_MIN_HEADROOM:
                 continue
 
             if b['max'] >= BUCKET_MAX_OPEN_ENDED:
                 mid = b['min'] + BUCKET_OPEN_ENDED_MID_OFFSET
             else:
                 mid = (b['min'] + b['max']) / 2
-
-            decay_factor = (p_hours_left / SIGMA_DECAY_BASE_HOURS) ** 0.5
-            decay_factor = max(SIGMA_DECAY_FACTOR_MIN, min(SIGMA_DECAY_FACTOR_MAX, decay_factor))
-            decayed_std = eff_std * decay_factor
-            if decayed_std <= 0:
-                continue
 
             p_min = norm.cdf(b['min'], final_mean, decayed_std)
             if b['max'] >= BUCKET_MAX_OPEN_ENDED:
