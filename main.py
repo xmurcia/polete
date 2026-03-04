@@ -463,7 +463,7 @@ def run():
                                                 save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 executed_trades_this_cycle.add(trade_key)
                                         # Victory lap: precio casi seguro ganador en últimas horas
-                                        elif m_poly['hours'] <= 48.0 and bid > 0.95:
+                                        elif m_poly['hours'] <= 48.0 and bid > VICTORY_LAP_PRICE:
                                             action = "ROTATE"; reason = f"CTR Victory Lap (${bid:.2f})"
                                             res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason,
                                                                 strategy_tag='CONTRARIAN', hours_left=p_hours_left,
