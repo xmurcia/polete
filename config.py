@@ -285,6 +285,9 @@ COOLDOWN_MOONSHOT_EXPIRED_HOURS = 24
 # Hours to wait before re-entering sold moonshot
 COOLDOWN_MOONSHOT_EXIT_HOURS = 48
 
+# Minutes to wait before retrying a failed SELL order (prevents infinite loop)
+COOLDOWN_SELL_FAILED_MINUTES = 5
+
 # ==============================================================================
 # MARKET EXPIRATION & TOLERANCE
 # ==============================================================================
