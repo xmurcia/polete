@@ -492,7 +492,7 @@ def run():
                                 elif hours_left > TIME_REMAINING_HOURS_RUN:
                                     profit_threshold = PROFIT_PROTECT_Z_MID if hours_left > VICTORY_LAP_TIME_HOURS else PROFIT_PROTECT_Z_LONG
                                     if profit_pct > PARANOID_TREASURE_MIN_PCT and z_score > PARANOID_TREASURE_Z: should_sell = True; sell_reason = "Paranoid Treasure (Secured)"
-                                    elif profit_pct > PROFIT_PROTECT_MIN_PCT and z_score > profit_threshold: should_sell = True; sell_reason = f"Protect Profit (Mid-Game Z{profit_threshold})"
+                                    # elif profit_pct > PROFIT_PROTECT_MIN_PCT and z_score > profit_threshold: should_sell = True; sell_reason = f"Protect Profit (Mid-Game Z{profit_threshold})"  # DISABLED: was exiting winning positions too early
 
                                     avg_entry = bid / (1 + profit_pct) if (1 + profit_pct) != 0 else bid
 
