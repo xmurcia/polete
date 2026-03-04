@@ -141,7 +141,7 @@ WARMUP_MIN_HISTORY_COUNT = 5
 # ==============================================================================
 
 # Sell when price reaches this level in final hours (lock in profit)
-VICTORY_LAP_PRICE = 0.95  # $0.95 or higher
+VICTORY_LAP_PRICE = 0.99  # $0.99 or higher
 
 # Only trigger victory lap in final hours of event
 VICTORY_LAP_TIME_HOURS = 48.0  # Last 48 hours
