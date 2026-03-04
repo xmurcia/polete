@@ -396,6 +396,9 @@ def run():
                                                 moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXPIRED_HOURS)
                                                 save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
                                                 executed_trades_this_cycle.add(trade_key)
+                                            else:
+                                                stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
                                             continue
 
                                         if bid >= MOONSHOT_EXIT_VICTORY_PRICE:
@@ -407,6 +410,9 @@ def run():
                                             if res:
                                                 save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 executed_trades_this_cycle.add(trade_key)
+                                            else:
+                                                stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
                                             continue
 
                                         if MOONSHOT_EXIT_PARTIAL_MIN_PRICE <= bid <= MOONSHOT_EXIT_PARTIAL_MAX_PRICE and profit_pct >= MOONSHOT_EXIT_PARTIAL_MIN_PROFIT:
@@ -418,6 +424,9 @@ def run():
                                             if res:
                                                 save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 executed_trades_this_cycle.add(trade_key)
+                                            else:
+                                                stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
                                             continue
 
                                     current_max = pos_data.get('max_price_seen', entry)
@@ -441,6 +450,9 @@ def run():
                                                     moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXIT_HOURS)
                                                     save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
                                                     executed_trades_this_cycle.add(trade_key)
+                                                else:
+                                                    stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
+                                                    save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
                                             continue
                                     continue
 
@@ -459,6 +471,9 @@ def run():
                                             if res:
                                                 save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 executed_trades_this_cycle.add(trade_key)
+                                            else:
+                                                stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
                                         # Victory lap: precio casi seguro ganador en últimas horas
                                         elif m_poly['hours'] <= VICTORY_LAP_TIME_HOURS and bid > VICTORY_LAP_PRICE:
                                             action = "ROTATE"; reason = f"CTR Victory Lap (${bid:.2f})"
@@ -469,6 +484,9 @@ def run():
                                             if res:
                                                 save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 executed_trades_this_cycle.add(trade_key)
+                                            else:
+                                                stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
                                     continue  # sin stop loss, sin timeouts — aguantar hasta resolución
 
                                 should_sell = False; sell_reason = ""
@@ -575,6 +593,10 @@ def run():
                                                 stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_STOP_LOSS_HOURS)
                                                 save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
                                             executed_trades_this_cycle.add(trade_key)  # Mark as executed
+                                        else:
+                                            # SELL falló — cooldown para evitar loop infinito de reintentos
+                                            stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
+                                            save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
 
                         elif not owned and not IS_WARMUP:
                             bucket_headroom = b['max'] - m_poly['count']
