@@ -512,7 +512,7 @@ def run():
                                     if hours_left < VICTORY_LAP_TIME_HOURS: sl_limit = STOP_LOSS_LATE_GAME
 
                                     if profit_pct < sl_limit and z_score > STOP_LOSS_Z_MIN: should_sell = True; sell_reason = f"Stop Loss Adaptativo (Hit {profit_pct*100:.1f}%)"
-                                    elif z_score > EXTREME_PANIC_Z and profit_pct < EXTREME_PANIC_MAX_PROFIT: should_sell = True; sell_reason = f"Extreme Panic (Z>{EXTREME_PANIC_Z})"
+                                    # elif z_score > EXTREME_PANIC_Z and profit_pct < EXTREME_PANIC_MAX_PROFIT: should_sell = True; sell_reason = f"Extreme Panic (Z>{EXTREME_PANIC_Z})"  # DESACTIVADO
 
                                 if should_sell:
                                     # Check if trade already executed this cycle
