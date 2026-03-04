@@ -554,19 +554,19 @@ class ProductionStrategy(BaseStrategy):
                     metadata={"z_score": z_score, "profit_pct": profit_pct}
                 )
 
-            # Pánico Global (V16 - ANTI-CHURNING EXTREMO)
+            # Pánico Global (V16 - ANTI-CHURNING EXTREMO) - DESACTIVADO
             # Solo vendemos si el mercado está ROTO (Z > 8.0).
             # Umbral extremo para evitar vender en volatilidad normal (Z 2-5 en backtest).
-            if z_score > 8.0 and profit_pct < 0.10:
-                return Signal(
-                    type=SignalType.SELL,
-                    market_title=market_state.title,
-                    bucket=bucket['bucket'],
-                    price=bid,
-                    confidence=0.9,
-                    reason="Extreme Panic (Z>8)",
-                    metadata={"z_score": z_score, "profit_pct": profit_pct}
-                )
+            # if z_score > 8.0 and profit_pct < 0.10:
+            #     return Signal(
+            #         type=SignalType.SELL,
+            #         market_title=market_state.title,
+            #         bucket=bucket['bucket'],
+            #         price=bid,
+            #         confidence=0.9,
+            #         reason="Extreme Panic (Z>8)",
+            #         metadata={"z_score": z_score, "profit_pct": profit_pct}
+            #     )
 
             # Stop Loss Adaptativo
             avg_entry = bid / (1 + profit_pct) if (1 + profit_pct) != 0 else bid
