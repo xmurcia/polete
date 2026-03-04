@@ -544,8 +544,14 @@ class UnifiedTrader:
             if not result.success:
                 print(f"[UnifiedTrader] ❌ Strategy 1 failed: {result.error}")
 
+            # Classify the failure type from Strategy 1 to decide fallback path
+            s1_error = str(result.error).lower() if not result.success else ""
+            s1_is_liquidity = "fully filled" in s1_error
+            s1_is_balance = "not enough balance" in s1_error or "allowance" in s1_error
+
             # Strategy 2: If FOK@bid fails due to liquidity, try FOK at ASK price (aggressive)
-            if not result.success and "fully filled" in str(result.error).lower() and ask_price and ask_price > price:
+            # Skip this for balance/allowance errors - another FOK won't help
+            if not result.success and s1_is_liquidity and ask_price and ask_price > price:
                 print(f"[UnifiedTrader] ⚠️  FOK@bid failed (low liquidity)")
                 print(f"[UnifiedTrader] 🎯 Strategy 2/3: FOK @ ASK ${ask_price:.3f} (more aggressive)")
 
@@ -570,8 +576,12 @@ class UnifiedTrader:
                     print(f"[UnifiedTrader] ❌ Strategy 2 failed: {result.error}")
 
             # Strategy 3: If still fails, use GTC (limit order that stays open)
-            if not result.success and "fully filled" in str(result.error).lower():
-                print(f"[UnifiedTrader] ⚠️  FOK@ask also failed")
+            # Triggered by: liquidity failure (after FOK@ask also failed) OR balance/allowance error
+            if not result.success and (s1_is_liquidity or s1_is_balance):
+                if s1_is_balance:
+                    print(f"[UnifiedTrader] ⚠️  FOK failed (not enough balance/allowance) - skipping FOK@ask")
+                else:
+                    print(f"[UnifiedTrader] ⚠️  FOK@ask also failed")
                 print(f"[UnifiedTrader] 🎯 Strategy 3/3: GTC @ BID ${price:.3f} (limit order)")
 
                 order_request_gtc = OrderRequest(
