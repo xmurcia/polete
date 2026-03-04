@@ -542,6 +542,14 @@ class TelegramNotifier:
 """
         self.send_message(message.strip())
 
+    def _classify_order_error(self, reason: str) -> str:
+        r = reason.lower()
+        if "not enough balance" in r or "allowance" in r:
+            return "Balance/allowance insuficiente - orden GTC enviada como fallback"
+        if "fully filled" in r:
+            return "FOK rechazada - sin liquidez"
+        return "Orden rechazada"
+
     def notify_order_failed(self, market: str, bucket: str, side: str,
                            price: float, reason: str = ""):
         """Alerta cuando falla ejecución de orden"""
@@ -554,7 +562,7 @@ class TelegramNotifier:
 <b>Precio:</b> {price*100:.0f}¢
 {f"<b>Razón:</b> {reason}" if reason else ""}
 
-⚠️ FOK rechazada - sin liquidez
+⚠️ {self._classify_order_error(reason)}
 ⏰ {datetime.now().strftime('%H:%M:%S')}
 """
         self.send_message(message.strip(), silent=True)
