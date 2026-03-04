@@ -22,6 +22,7 @@ from src.paper_trader import PaperTrader
 from src.market_panic_sensor import MarketPanicSensor
 from src.moonshot import ejecutar_moonshot_satelite
 from src.auto_hedge import gestionar_cobertura_final
+from src.contrarian import ejecutar_contrarian
 from src.utils import save_market_tape, save_trade_snapshot, titles_match_paranoid, get_bio_multiplier, detect_event_type
 
 # Asegurar que existen los directorios necesarios
@@ -120,10 +121,10 @@ def run():
     # ==============================================================================
     COOLDOWNS_FILE = os.path.join(LOGS_DIR, "cooldowns.json")
 
-    def load_cooldowns() -> tuple[dict, dict]:
+    def load_cooldowns() -> tuple[dict, dict, dict]:
         """Carga cooldowns desde fichero, descartando los ya expirados."""
         if not os.path.exists(COOLDOWNS_FILE):
-            return {}, {}
+            return {}, {}, {}
         try:
             with open(COOLDOWNS_FILE) as f:
                 data = json.load(f)
@@ -132,26 +133,29 @@ def run():
                   if datetime.fromisoformat(v) > now}
             ms = {k: datetime.fromisoformat(v) for k, v in data.get("moonshot", {}).items()
                   if datetime.fromisoformat(v) > now}
-            print(f"[Cooldowns] ✅ Cargados: {len(sl)} stop_loss, {len(ms)} moonshot activos")
-            return sl, ms
+            ct = {k: datetime.fromisoformat(v) for k, v in data.get("contrarian", {}).items()
+                  if datetime.fromisoformat(v) > now}
+            print(f"[Cooldowns] ✅ Cargados: {len(sl)} stop_loss, {len(ms)} moonshot, {len(ct)} contrarian activos")
+            return sl, ms, ct
         except Exception as e:
             print(f"[Cooldowns] ⚠️  Error cargando: {e}")
-            return {}, {}
+            return {}, {}, {}
 
-    def save_cooldowns(sl: dict, ms: dict):
+    def save_cooldowns(sl: dict, ms: dict, ct: dict = None):
         """Persiste cooldowns activos a fichero."""
         try:
             data = {
-                "stop_loss": {k: v.isoformat() for k, v in sl.items()},
-                "moonshot":  {k: v.isoformat() for k, v in ms.items()},
-                "saved_at":  datetime.now().isoformat()
+                "stop_loss":  {k: v.isoformat() for k, v in sl.items()},
+                "moonshot":   {k: v.isoformat() for k, v in ms.items()},
+                "contrarian": {k: v.isoformat() for k, v in (ct or {}).items()},
+                "saved_at":   datetime.now().isoformat()
             }
             with open(COOLDOWNS_FILE, "w") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
             print(f"[Cooldowns] ⚠️  Error guardando: {e}")
 
-    stop_loss_cooldowns, moonshot_cooldowns = load_cooldowns()
+    stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns = load_cooldowns()
 
     # ==============================================================================
     # 🔒 TRADE LOCK: Evitar trades duplicados en el mismo ciclo
@@ -326,6 +330,23 @@ def run():
                     if my_buckets_ids:
                         print(f"[DEBUG] Market: {m_poly['title']}, Owned: {my_buckets_ids}, Hours: {m_poly.get('hours', 'N/A')}")
 
+                    # CONTRARIAN: primer pase antes de la lógica estándar
+                    ejecutar_contrarian(
+                        trader=trader,
+                        m_poly=m_poly,
+                        m_clob=m_clob,
+                        final_mean=final_mean,
+                        eff_std=eff_std,
+                        consensus=consensus,
+                        p_count=p_count,
+                        p_hours_left=p_hours_left,
+                        p_avg_hist=p_avg_hist,
+                        alerts=alerts,
+                        stop_loss_cooldowns=stop_loss_cooldowns,
+                        contrarian_cooldowns=contrarian_cooldowns,
+                        executed_trades_this_cycle=executed_trades_this_cycle
+                    )
+
                     for b in m_clob['buckets']:
                         if b['max'] < m_poly['count']: continue
 
@@ -376,7 +397,7 @@ def run():
                                             if res:
                                                 save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXPIRED_HOURS)
-                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
                                                 executed_trades_this_cycle.add(trade_key)
                                             continue
 
@@ -421,11 +442,62 @@ def run():
                                                 if res:
                                                     save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                     moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXIT_HOURS)
-                                                    save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns)
+                                                    save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
                                                     executed_trades_this_cycle.add(trade_key)
                                             continue
                                     continue
-                                
+
+                                if pos_data.get('strategy_tag') == 'CONTRARIAN':
+                                    trade_key = (m_poly['title'], b['bucket'], "ROTATE")
+                                    if trade_key not in executed_trades_this_cycle:
+                                        hours_left_c = m_poly['hours']
+                                        hours_since_entry = (time.time() - pos_data.get('timestamp', time.time())) / 3600
+                                        # Stop loss más agresivo para posiciones contrarian
+                                        if profit_pct < CONTRARIAN_STOP_LOSS and hours_left_c > 24.0:
+                                            action = "ROTATE"; reason = f"Contrarian Stop ({profit_pct*100:.0f}%)"
+                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason,
+                                                                strategy_tag='CONTRARIAN', hours_left=p_hours_left,
+                                                                tweet_count=p_count, market_consensus=consensus,
+                                                                entry_z_score=z_score)
+                                            if res:
+                                                save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
+                                                contrarian_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_CONTRARIAN_HOURS)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
+                                                executed_trades_this_cycle.add(trade_key)
+                                        # Take profit: recuperación suficiente
+                                        elif profit_pct >= CONTRARIAN_TAKE_PROFIT_PCT:
+                                            action = "ROTATE"; reason = f"Contrarian Recovery ({profit_pct*100:.0f}%)"
+                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason,
+                                                                strategy_tag='CONTRARIAN', hours_left=p_hours_left,
+                                                                tweet_count=p_count, market_consensus=consensus,
+                                                                entry_z_score=z_score)
+                                            if res:
+                                                save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
+                                                executed_trades_this_cycle.add(trade_key)
+                                        # Time stop: sin recuperación tras tiempo máximo
+                                        elif hours_since_entry >= CONTRARIAN_MAX_HOLD_HOURS and profit_pct < CONTRARIAN_MIN_PROFIT_TO_HOLD:
+                                            action = "ROTATE"; reason = f"Contrarian Timeout ({hours_since_entry:.0f}h, {profit_pct*100:.0f}%)"
+                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason,
+                                                                strategy_tag='CONTRARIAN', hours_left=p_hours_left,
+                                                                tweet_count=p_count, market_consensus=consensus,
+                                                                entry_z_score=z_score)
+                                            if res:
+                                                save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
+                                                contrarian_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_CONTRARIAN_HOURS)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
+                                                executed_trades_this_cycle.add(trade_key)
+                                        # Victory lap contrarian (mismo que standard)
+                                        elif hours_left_c <= 48.0 and bid > 0.95:
+                                            action = "ROTATE"; reason = f"Contrarian Victory Lap (${bid:.2f})"
+                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason,
+                                                                strategy_tag='CONTRARIAN', hours_left=p_hours_left,
+                                                                tweet_count=p_count, market_consensus=consensus,
+                                                                entry_z_score=z_score)
+                                            if res:
+                                                save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
+                                                executed_trades_this_cycle.add(trade_key)
+                                    continue  # skip standard exits for CONTRARIAN
+
                                 should_sell = False; sell_reason = ""
                                 bucket_headroom = b['max'] - m_poly['count']
                                 hours_left = m_poly['hours']
@@ -528,7 +600,7 @@ def run():
                                             # Persistir stop_loss_cooldown si aplica
                                             if "Stop Loss" in sell_reason or "Catastrophic" in sell_reason or "Emergency" in sell_reason or "Panic" in sell_reason:
                                                 stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_STOP_LOSS_HOURS)
-                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
                                             executed_trades_this_cycle.add(trade_key)  # Mark as executed
 
                         elif not owned and not IS_WARMUP:

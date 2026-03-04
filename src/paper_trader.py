@@ -108,6 +108,8 @@ class PaperTrader:
                     base_pct = self.risk_pct_moonshot
                 elif "SPREAD" in strategy_tag:
                     base_pct = RISK_PCT_SPREAD
+                elif strategy_tag == "CONTRARIAN":
+                    base_pct = RISK_PCT_CONTRARIAN
                 elif "FISH" in signal:
                     base_pct = self.risk_pct_lotto
                 elif "HEDGE" in signal:
@@ -131,6 +133,8 @@ class PaperTrader:
                 final_pct = base_pct * multiplier
                 final_pct = min(final_pct, MAX_POSITION_SIZE_PCT)
                 bet_amount = max(self.portfolio["cash"] * final_pct, self.min_bet)
+                if strategy_tag == "CONTRARIAN":
+                    bet_amount = min(bet_amount, CONTRARIAN_MAX_BET)
 
                 if self.portfolio["cash"] >= bet_amount:
                     shares = bet_amount / price

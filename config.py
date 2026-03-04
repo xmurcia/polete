@@ -124,6 +124,58 @@ CLUSTER_MULTIPLIER_SHORT_EARLY = 1.5   # >24h remaining: Allow 1.5 buckets apart
 CLUSTER_MULTIPLIER_SHORT_LATE = 1.0    # ≤24h remaining: Allow 1.0 buckets apart (24 tweets, neighbors only)
 
 # ==============================================================================
+# CONTRARIAN STRATEGY (Counter-Market Mispricings)
+# ==============================================================================
+
+# Relaxed Z-score: allows entry even when model is less certain
+CONTRARIAN_MAX_Z = 2.50
+
+# Larger edge required to compensate for lower model confidence
+CONTRARIAN_MIN_EDGE = 0.12
+
+# Minimum fair value: bucket must have real probability mass
+CONTRARIAN_MIN_FAIR = 0.15
+
+# Maximum ask price for entry (avoids already-recovered buckets)
+CONTRARIAN_MAX_PRICE_ENTRY = 0.40
+
+# Minimum bucket headroom (tweets to bucket max)
+CONTRARIAN_MIN_HEADROOM = 8
+
+# Minimum hours remaining to allow entry
+CONTRARIAN_MIN_HOURS = 6.0
+
+# Maximum concurrent contrarian positions per market
+CONTRARIAN_MAX_CONCURRENT = 2
+
+# Risk percentage per contrarian trade
+RISK_PCT_CONTRARIAN = 0.02
+
+# Hard dollar cap per contrarian trade
+CONTRARIAN_MAX_BET = 20.0
+
+# Tolerance for consensus-to-prediction alignment (tweets)
+CONTRARIAN_CONSENSUS_TOLERANCE = 15.0
+
+# Max distance from mean for bucket to qualify (in std deviations)
+CONTRARIAN_MAX_DISTANCE_FROM_MEAN = 1.5
+
+# Take profit: exit when bid recovers this fraction from entry
+CONTRARIAN_TAKE_PROFIT_PCT = 0.60
+
+# Time stop: exit if no recovery after this many hours
+CONTRARIAN_MAX_HOLD_HOURS = 12.0
+
+# Minimum profit required to continue holding past time stop
+CONTRARIAN_MIN_PROFIT_TO_HOLD = 0.10
+
+# Hard stop loss (tighter than standard -40%)
+CONTRARIAN_STOP_LOSS = -0.35
+
+# Cooldown hours after a contrarian stop-loss exit
+COOLDOWN_CONTRARIAN_HOURS = 6
+
+# ==============================================================================
 # WARMUP CONDITIONS (Avoid Trading with Insufficient Data)
 # ==============================================================================
 
