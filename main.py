@@ -493,7 +493,12 @@ def run():
                                 bucket_headroom = b['max'] - m_poly['count']
                                 hours_left = m_poly['hours']
 
-                                # PHYSICAL IMPOSSIBILITY: Exit if outcome is mathematically impossible
+                                # PHYSICAL IMPOSSIBILITY: Exit if outcome is mathematically impossible.
+                                # Caso 1: el contador ya superó el techo del bucket → nunca puede resolver YES.
+                                # Caso 2: faltan más tweets de los que es físicamente posible emitir en el tiempo restante.
+                                #   max_possible = tasa_histórica × horas_restantes × PHYSICAL_MAX_MULTIPLIER (2.5×).
+                                #   Guard p_avg_hist > 0: si el evento aún no empezó (daily_avg=0, sin datos),
+                                #   no hay base para declarar imposibilidad → se omite el chequeo.
                                 if bucket_headroom < 0:
                                     should_sell = True; sell_reason = f"Physical Exit (count exceeded bucket max)"
                                 else:
