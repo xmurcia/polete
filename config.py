@@ -124,6 +124,37 @@ CLUSTER_MULTIPLIER_SHORT_EARLY = 1.5   # >24h remaining: Allow 1.5 buckets apart
 CLUSTER_MULTIPLIER_SHORT_LATE = 1.0    # ≤24h remaining: Allow 1.0 buckets apart (24 tweets, neighbors only)
 
 # ==============================================================================
+# CONTRARIAN STRATEGY (New Events, Flat Curve, Hold to Resolution)
+# ==============================================================================
+
+# Max tweet count to allow entry — events just starting (maximum uncertainty)
+CONTRARIAN_MAX_TWEETS_ENTRY = 10
+
+# Minimum hours remaining to allow entry
+CONTRARIAN_MIN_HOURS = 24.0
+
+# Max bid anywhere in market — ensures curve is still flat
+CONTRARIAN_FLAT_CURVE_MAX_BID = 0.30
+
+# Minimum edge required (Hawkes model sees more value than ask)
+CONTRARIAN_MIN_EDGE = 0.08
+
+# Minimum fair value — bucket must have real probability mass
+CONTRARIAN_MIN_FAIR = 0.10
+
+# Maximum ask price for entry
+CONTRARIAN_MAX_PRICE_ENTRY = 0.35
+
+# Minimum bucket headroom (tweets to bucket max)
+CONTRARIAN_MIN_HEADROOM = 5
+
+# Maximum concurrent contrarian positions per market
+CONTRARIAN_MAX_CONCURRENT = 3
+
+# Risk percentage per contrarian trade (no hard dollar cap)
+RISK_PCT_CONTRARIAN = 0.02
+
+# ==============================================================================
 # WARMUP CONDITIONS (Avoid Trading with Insufficient Data)
 # ==============================================================================
 

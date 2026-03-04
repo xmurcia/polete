@@ -108,6 +108,8 @@ class PaperTrader:
                     base_pct = self.risk_pct_moonshot
                 elif "SPREAD" in strategy_tag:
                     base_pct = RISK_PCT_SPREAD
+                elif strategy_tag == "CONTRARIAN":
+                    base_pct = RISK_PCT_CONTRARIAN
                 elif "FISH" in signal:
                     base_pct = self.risk_pct_lotto
                 elif "HEDGE" in signal:
