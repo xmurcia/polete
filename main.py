@@ -289,9 +289,11 @@ def run():
 
                                 if w_vol > 0:
                                     consensus = w_sum / w_vol
-                                    if abs(final_mean - consensus) > (consensus * CONSENSUS_DEVIATION_THRESHOLD):
-                                        final_mean = (final_mean * CONSENSUS_MODEL_WEIGHT_WHEN_DIVERGENT) + (consensus * CONSENSUS_WEIGHT_WHEN_DIVERGENT)
-                                        mode_tag += MODE_TAG_MARKET_CONSENSUS
+                                    # Always blend: weight grows from 30% (start) to 70% (end)
+                                    time_progress = min(1.0, max(0.0, 1.0 - (p_hours_left / total_duration))) if total_duration > 0 else 0.5
+                                    effective_market_weight = 0.30 + (0.40 * time_progress)
+                                    final_mean = ((1 - effective_market_weight) * final_mean) + (effective_market_weight * consensus)
+                                    mode_tag += MODE_TAG_MARKET_CONSENSUS
                         except Exception: pass 
 
                         raw_sigma = (final_mean ** 0.5) * SIGMA_BASE_MULTIPLIER
@@ -428,6 +430,22 @@ def run():
                                 bucket_headroom = b['max'] - m_poly['count']
                                 hours_left = m_poly['hours']
 
+                                # PHYSICAL IMPOSSIBILITY: Exit if outcome is mathematically impossible
+                                if bucket_headroom < 0:
+                                    should_sell = True; sell_reason = f"Physical Exit (count exceeded bucket max)"
+                                else:
+                                    tweets_needed = b['min'] - m_poly['count']
+                                    if tweets_needed > 0:
+                                        max_possible = (p_avg_hist / HOURS_PER_DAY) * hours_left * PHYSICAL_MAX_MULTIPLIER
+                                        if tweets_needed > max_possible:
+                                            should_sell = True; sell_reason = f"Physical Exit (need {int(tweets_needed)} tweets, max {int(max_possible)} possible)"
+
+                                # SPREAD LOSER PRUNE: Free capital from losing SPREAD bets in final phase
+                                strategy_tag_pos = pos_data.get('strategy_tag', 'STANDARD')
+                                if not should_sell and 'SPREAD' in strategy_tag_pos:
+                                    if hours_left <= SPREAD_LOSER_PRUNE_HOURS and bid < SPREAD_LOSER_PRUNE_BID:
+                                        should_sell = True; sell_reason = f"SPREAD Loser Prune (bid={bid:.3f}, {hours_left:.0f}h left)"
+
                                 if hours_left > TIME_REMAINING_HOURS_RUN: base_threshold = PROXIMITY_BASE_THRESHOLD_LONG
                                 elif hours_left > 12.0: base_threshold = PROXIMITY_BASE_THRESHOLD_MID
                                 elif hours_left > TIME_REMAINING_HOURS_SPRINT: base_threshold = PROXIMITY_BASE_THRESHOLD_SHORT
@@ -517,11 +535,43 @@ def run():
                             bucket_headroom = b['max'] - m_poly['count']
                             hours_left = m_poly['hours']
 
-                            # Guard: long events (>72h total) → only enter in final 72h
+                            # Phase detection: SPREAD (early flat curve) vs PRECISION (converging/final)
                             total_duration = m_poly.get('total_hours', 0)
-                            if total_duration > TIME_REMAINING_HOURS_MARATHON and hours_left > TIME_REMAINING_HOURS_MARATHON:
-                                continue
+                            is_early_event = total_duration > TIME_REMAINING_HOURS_MARATHON and hours_left > TIME_REMAINING_HOURS_MARATHON
+                            if is_early_event:
+                                all_bkts = m_clob.get('buckets', [])
+                                max_bid_in_market = max((bk.get('bid', 0) for bk in all_bkts), default=0)
+                                if max_bid_in_market >= FLAT_CURVE_THRESHOLD:
+                                    continue  # Early event already converging: wait for PRECISION phase
 
+                                # SPREAD mode: distribute across 3 scenarios, hold to resolution
+                                baseline_rate = p_avg_hist / HOURS_PER_DAY
+                                scenario_low  = p_count + baseline_rate * hours_left * 0.60
+                                scenario_mid  = p_count + baseline_rate * hours_left * 1.00
+                                scenario_high = p_count + baseline_rate * hours_left * 1.50
+
+                                matches_scenario = None
+                                if b['min'] <= scenario_low <= b['max']:
+                                    matches_scenario = 'SPREAD-LOW'
+                                elif b['min'] <= scenario_mid <= b['max']:
+                                    matches_scenario = 'SPREAD-MID'
+                                elif b['min'] <= scenario_high <= b['max']:
+                                    matches_scenario = 'SPREAD-HIGH'
+
+                                if matches_scenario and MIN_PRICE_ENTRY <= ask <= 0.30 and b['max'] >= p_count:
+                                    trade_key = (m_poly['title'], b['bucket'], "BUY")
+                                    if trade_key not in executed_trades_this_cycle:
+                                        action = "BUY"; reason = matches_scenario
+                                        res = trader.execute(m_poly['title'], b['bucket'], "BUY", ask, reason,
+                                                            strategy_tag=matches_scenario, hours_left=p_hours_left,
+                                                            tweet_count=p_count, market_consensus=consensus,
+                                                            entry_z_score=z_score, tick_size=b.get('tick_size'))
+                                        if res:
+                                            save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"scenario": matches_scenario, "z": z_score}, hours_left=p_hours_left, tweet_count=p_count)
+                                            executed_trades_this_cycle.add(trade_key)
+                                continue  # SPREAD mode done, skip PRECISION logic below
+
+                            # PRECISION mode: Standard entry logic
                             if hours_left > TIME_REMAINING_HOURS_RUN: base_threshold = PROXIMITY_BASE_THRESHOLD_LONG
 
                             elif hours_left > 12.0: base_threshold = PROXIMITY_BASE_THRESHOLD_MID

@@ -106,6 +106,8 @@ class PaperTrader:
                 # 1. DEFINIR TAMAÑO BASE
                 if strategy_tag == "MOONSHOT":
                     base_pct = self.risk_pct_moonshot
+                elif "SPREAD" in strategy_tag:
+                    base_pct = RISK_PCT_SPREAD
                 elif "FISH" in signal:
                     base_pct = self.risk_pct_lotto
                 elif "HEDGE" in signal:

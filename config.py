@@ -95,7 +95,7 @@ KELLY_EDGE_THRESHOLD_MED = 0.20     # 20% edge = medium confidence
 
 # Maximum Z-score to enter a trade (statistical distance from prediction)
 # Lower = closer to prediction, safer
-MAX_Z_SCORE_ENTRY = 0.75
+MAX_Z_SCORE_ENTRY = 1.20
 
 # Minimum ask price to consider (filters out nearly-expired buckets)
 MIN_PRICE_ENTRY = 0.02  # $0.02 minimum
@@ -141,7 +141,7 @@ WARMUP_MIN_HISTORY_COUNT = 5
 # ==============================================================================
 
 # Sell when price reaches this level in final hours (lock in profit)
-VICTORY_LAP_PRICE = 0.95  # $0.95 or higher
+VICTORY_LAP_PRICE = 0.99  # $0.99 or higher
 
 # Only trigger victory lap in final hours of event
 VICTORY_LAP_TIME_HOURS = 48.0  # Last 48 hours
@@ -184,7 +184,7 @@ STOP_LOSS_MID_GAME_EMERGENCY = -0.60  # -60% pérdida en franja 24-48h
 STOP_LOSS_MID_GAME_Z_MIN = 4.0        # Z > 4.0 = muy lejos de la predicción
 
 # Minimum Z-score to trigger stop loss (prevents panic selling)
-STOP_LOSS_Z_MIN = 1.3
+STOP_LOSS_Z_MIN = 2.0
 
 # ==============================================================================
 # EXIT CONDITIONS - CATASTROPHIC LOSS (Final Phase Only)
@@ -400,7 +400,24 @@ BUCKET_OPEN_ENDED_MID_OFFSET = 20
 # As event progresses, weight current rate more heavily
 FATIGUE_WEIGHT_SPRINT = 0.95   # < 6h: 95% current, 5% historical
 FATIGUE_WEIGHT_RUN = 0.75      # < 24h: 75% current, 25% historical
-FATIGUE_WEIGHT_MARATHON = 0.35 # > 24h: 35% current, 65% historical
+FATIGUE_WEIGHT_MARATHON = 0.55 # > 24h: 55% current, 45% historical
+
+# ==============================================================================
+# SPREAD STRATEGY (Early Flat-Curve Positioning)
+# ==============================================================================
+
+# Risk % per SPREAD position (3 positions = 4.5% total max)
+RISK_PCT_SPREAD = 0.015  # 1.5% per scenario bucket
+
+# Market is "flat curve" when no bucket dominates (early uncertainty phase)
+FLAT_CURVE_THRESHOLD = 0.45  # If max bid < 0.45, curve is still flat
+
+# Physical impossibility multiplier: max realistic tweet rate vs historical avg
+PHYSICAL_MAX_MULTIPLIER = 2.5  # Can tweet at most 2.5x daily_avg rate
+
+# SPREAD Loser Prune: exit losing SPREAD bets in final phase to free capital
+SPREAD_LOSER_PRUNE_BID = 0.15   # Exit if bid below this in final phase
+SPREAD_LOSER_PRUNE_HOURS = 24.0  # Final hours threshold to prune
 
 # ==============================================================================
 # RATE LIMITING (Prevent Absurd Predictions in Marathon Mode)
