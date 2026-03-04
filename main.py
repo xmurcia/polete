@@ -493,20 +493,17 @@ def run():
                                 bucket_headroom = b['max'] - m_poly['count']
                                 hours_left = m_poly['hours']
 
-                                # PHYSICAL IMPOSSIBILITY: Exit if outcome is mathematically impossible.
-                                # Caso 1: el contador ya superó el techo del bucket → nunca puede resolver YES.
-                                # Caso 2: faltan más tweets de los que es físicamente posible emitir en el tiempo restante.
-                                #   max_possible = tasa_histórica × horas_restantes × PHYSICAL_MAX_MULTIPLIER (2.5×).
-                                #   Guard p_avg_hist > 0: si el evento aún no empezó (daily_avg=0, sin datos),
-                                #   no hay base para declarar imposibilidad → se omite el chequeo.
-                                if bucket_headroom < 0:
-                                    should_sell = True; sell_reason = f"Physical Exit (count exceeded bucket max)"
-                                else:
-                                    tweets_needed = b['min'] - m_poly['count']
-                                    if tweets_needed > 0 and p_avg_hist > 0:
-                                        max_possible = (p_avg_hist / HOURS_PER_DAY) * hours_left * PHYSICAL_MAX_MULTIPLIER
-                                        if tweets_needed > max_possible:
-                                            should_sell = True; sell_reason = f"Physical Exit (need {int(tweets_needed)} tweets, max {int(max_possible)} possible)"
+                                # PHYSICAL IMPOSSIBILITY: desactivado — el modelo de precios ya descuenta
+                                # la imposibilidad; salir aquí penaliza posiciones legítimas en eventos
+                                # futuros o de larga duración donde la tasa histórica no es representativa.
+                                # if bucket_headroom < 0:
+                                #     should_sell = True; sell_reason = f"Physical Exit (count exceeded bucket max)"
+                                # else:
+                                #     tweets_needed = b['min'] - m_poly['count']
+                                #     if tweets_needed > 0 and p_avg_hist > 0:
+                                #         max_possible = (p_avg_hist / HOURS_PER_DAY) * hours_left * PHYSICAL_MAX_MULTIPLIER
+                                #         if tweets_needed > max_possible:
+                                #             should_sell = True; sell_reason = f"Physical Exit (need {int(tweets_needed)} tweets, max {int(max_possible)} possible)"
 
                                 # SPREAD LOSER PRUNE: Free capital from losing SPREAD bets in final phase
                                 strategy_tag_pos = pos_data.get('strategy_tag', 'STANDARD')
