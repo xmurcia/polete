@@ -133,8 +133,6 @@ class PaperTrader:
                 final_pct = base_pct * multiplier
                 final_pct = min(final_pct, MAX_POSITION_SIZE_PCT)
                 bet_amount = max(self.portfolio["cash"] * final_pct, self.min_bet)
-                if strategy_tag == "CONTRARIAN":
-                    bet_amount = min(bet_amount, CONTRARIAN_MAX_BET)
 
                 if self.portfolio["cash"] >= bet_amount:
                     shares = bet_amount / price

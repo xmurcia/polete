@@ -448,25 +448,13 @@ def run():
                                     continue
 
                                 if pos_data.get('strategy_tag') == 'CONTRARIAN':
+                                    # CONTRARIAN: aguantar hasta resolución — solo exits obligatorios
                                     trade_key = (m_poly['title'], b['bucket'], "ROTATE")
                                     if trade_key not in executed_trades_this_cycle:
-                                        hours_left_c = m_poly['hours']
-                                        hours_since_entry = (time.time() - pos_data.get('timestamp', time.time())) / 3600
-                                        # Stop loss más agresivo para posiciones contrarian
-                                        if profit_pct < CONTRARIAN_STOP_LOSS and hours_left_c > 24.0:
-                                            action = "ROTATE"; reason = f"Contrarian Stop ({profit_pct*100:.0f}%)"
-                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason,
-                                                                strategy_tag='CONTRARIAN', hours_left=p_hours_left,
-                                                                tweet_count=p_count, market_consensus=consensus,
-                                                                entry_z_score=z_score)
-                                            if res:
-                                                save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
-                                                contrarian_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_CONTRARIAN_HOURS)
-                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
-                                                executed_trades_this_cycle.add(trade_key)
-                                        # Take profit: recuperación suficiente
-                                        elif profit_pct >= CONTRARIAN_TAKE_PROFIT_PCT:
-                                            action = "ROTATE"; reason = f"Contrarian Recovery ({profit_pct*100:.0f}%)"
+                                        bucket_headroom_c = b['max'] - m_poly['count']
+                                        # Imposibilidad física: el bucket ya no puede ganar
+                                        if bucket_headroom_c < 0:
+                                            action = "ROTATE"; reason = "CTR Physical Exit"
                                             res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason,
                                                                 strategy_tag='CONTRARIAN', hours_left=p_hours_left,
                                                                 tweet_count=p_count, market_consensus=consensus,
@@ -474,21 +462,9 @@ def run():
                                             if res:
                                                 save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 executed_trades_this_cycle.add(trade_key)
-                                        # Time stop: sin recuperación tras tiempo máximo
-                                        elif hours_since_entry >= CONTRARIAN_MAX_HOLD_HOURS and profit_pct < CONTRARIAN_MIN_PROFIT_TO_HOLD:
-                                            action = "ROTATE"; reason = f"Contrarian Timeout ({hours_since_entry:.0f}h, {profit_pct*100:.0f}%)"
-                                            res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason,
-                                                                strategy_tag='CONTRARIAN', hours_left=p_hours_left,
-                                                                tweet_count=p_count, market_consensus=consensus,
-                                                                entry_z_score=z_score)
-                                            if res:
-                                                save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
-                                                contrarian_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_CONTRARIAN_HOURS)
-                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
-                                                executed_trades_this_cycle.add(trade_key)
-                                        # Victory lap contrarian (mismo que standard)
-                                        elif hours_left_c <= 48.0 and bid > 0.95:
-                                            action = "ROTATE"; reason = f"Contrarian Victory Lap (${bid:.2f})"
+                                        # Victory lap: precio casi seguro ganador en últimas horas
+                                        elif m_poly['hours'] <= 48.0 and bid > 0.95:
+                                            action = "ROTATE"; reason = f"CTR Victory Lap (${bid:.2f})"
                                             res = trader.execute(m_poly['title'], b['bucket'], "ROTATE", bid, reason,
                                                                 strategy_tag='CONTRARIAN', hours_left=p_hours_left,
                                                                 tweet_count=p_count, market_consensus=consensus,
@@ -496,7 +472,7 @@ def run():
                                             if res:
                                                 save_trade_snapshot("ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 executed_trades_this_cycle.add(trade_key)
-                                    continue  # skip standard exits for CONTRARIAN
+                                    continue  # sin stop loss, sin timeouts — aguantar hasta resolución
 
                                 should_sell = False; sell_reason = ""
                                 bucket_headroom = b['max'] - m_poly['count']
