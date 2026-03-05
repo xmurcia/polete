@@ -573,6 +573,9 @@ def run():
                                             and profit_pct < STOP_LOSS_MID_GAME_EMERGENCY
                                             and z_score > STOP_LOSS_MID_GAME_Z_MIN):
                                         should_sell = True; sell_reason = f"Mid-Game Emergency Stop ({profit_pct*100:.0f}%, Z{z_score:.1f})"
+                                    elif (TIME_REMAINING_HOURS_RUN < hours_left <= VICTORY_LAP_TIME_HOURS):
+                                        # 🔔 EMERGENCY_WATCH: posición en franja 24-48h — log para análisis 12/03
+                                        print(f"[EMERGENCY_WATCH] {b['bucket']}: pnl={profit_pct*100:.0f}% Z={z_score:.2f} hrs={hours_left:.1f} (disparo si pnl<{STOP_LOSS_MID_GAME_EMERGENCY*100:.0f}% AND Z>{STOP_LOSS_MID_GAME_Z_MIN})")
 
                                     if hours_left < VICTORY_LAP_TIME_HOURS: sl_limit = STOP_LOSS_LATE_GAME
 
@@ -589,7 +592,7 @@ def run():
                                                             tweet_count=p_count, market_consensus=consensus,
                                                             entry_z_score=z_score)
                                         if res:
-                                            save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
+                                            save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct, "entry": entry, "trigger": sell_reason.split(" ")[0]}, hours_left=p_hours_left, tweet_count=p_count)
                                             # Persistir stop_loss_cooldown si aplica
                                             if "Stop Loss" in sell_reason or "Catastrophic" in sell_reason or "Emergency" in sell_reason or "Panic" in sell_reason:
                                                 stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_STOP_LOSS_HOURS)
@@ -720,6 +723,13 @@ def run():
                                                     executed_trades_this_cycle.add(trade_key)  # Mark as executed
                                             else:
                                                 action = "-"; reason = "Already executed this cycle"
+                                        else:
+                                            print(f"[GATE_BLOCKED] CLUSTER: {b['bucket']} z={z_score:.2f} edge={edge:.3f}")
+                                    else:
+                                        print(f"[GATE_BLOCKED] EDGE: {b['bucket']} edge={fair-ask:.3f} < min={dynamic_min_edge:.3f} z={z_score:.2f}")
+                                else:
+                                    if z_score > MAX_Z_SCORE_ENTRY:
+                                        print(f"[GATE_BLOCKED] Z_SCORE: {b['bucket']} z={z_score:.2f} > MAX={MAX_Z_SCORE_ENTRY} fair={fair:.3f} ask={ask:.3f}")
 
                         color_act = f"🟢 {action}" if "BUY" in action else (f"🔴 {action}" if "ROTATE" in action or "PROFIT" in action else "-")
                         bucket_display = f"*{b['bucket']}" if owned else f"{b['bucket']}"
