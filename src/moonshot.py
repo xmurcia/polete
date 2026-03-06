@@ -2,7 +2,7 @@ import time
 from datetime import datetime, timedelta
 from config import *
 
-def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p_hours_left, moonshot_cooldowns):
+def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p_hours_left, moonshot_cooldowns, order_failed_cooldowns=None):
     """
     Estrategia secundaria que opera SOLO al final del ciclo.
     Busca 'Cisnes Negros' al alza (buckets lejanos y baratos).
@@ -67,10 +67,18 @@ def ejecutar_moonshot_satelite(trader, m_poly, clob_data, p_count, p_avg_hist, p
         if candidates:
             candidates.sort(key=lambda x: x['dist'])
             best = candidates[0]
+            _order_key = f"{m_poly['title']}|{best['bucket']['bucket']}"
+            if order_failed_cooldowns is not None and _order_key in order_failed_cooldowns:
+                if datetime.now() < order_failed_cooldowns[_order_key]:
+                    return
+                else:
+                    del order_failed_cooldowns[_order_key]
             print(f"    🛰️ MOONSHOT OPORTUNIDAD: {best['bucket']['bucket']} @ ${best['ask']:.2f}")
-            trader.execute(m_poly['title'], best['bucket']['bucket'], "BUY", best['ask'], "Moonshot V33",
+            res = trader.execute(m_poly['title'], best['bucket']['bucket'], "BUY", best['ask'], "Moonshot V33",
                           strategy_tag="MOONSHOT", hours_left=p_hours_left, tweet_count=p_count,
                           market_consensus=None, entry_z_score=None, tick_size=best['bucket'].get('tick_size'))
+            if not res and order_failed_cooldowns is not None:
+                order_failed_cooldowns[_order_key] = datetime.now() + timedelta(minutes=COOLDOWN_ORDER_FAILED_MINUTES)
             time.sleep(1.0)
 
     except Exception as e: pass
