@@ -121,10 +121,10 @@ def run():
     # ==============================================================================
     COOLDOWNS_FILE = os.path.join(LOGS_DIR, "cooldowns.json")
 
-    def load_cooldowns() -> tuple[dict, dict, dict]:
+    def load_cooldowns() -> tuple[dict, dict, dict, dict]:
         """Carga cooldowns desde fichero, descartando los ya expirados."""
         if not os.path.exists(COOLDOWNS_FILE):
-            return {}, {}, {}
+            return {}, {}, {}, {}
         try:
             with open(COOLDOWNS_FILE) as f:
                 data = json.load(f)
@@ -135,27 +135,30 @@ def run():
                   if datetime.fromisoformat(v) > now}
             ct = {k: datetime.fromisoformat(v) for k, v in data.get("contrarian", {}).items()
                   if datetime.fromisoformat(v) > now}
-            print(f"[Cooldowns] ✅ Cargados: {len(sl)} stop_loss, {len(ms)} moonshot, {len(ct)} contrarian activos")
-            return sl, ms, ct
+            of = {k: datetime.fromisoformat(v) for k, v in data.get("order_failed", {}).items()
+                  if datetime.fromisoformat(v) > now}
+            print(f"[Cooldowns] ✅ Cargados: {len(sl)} stop_loss, {len(ms)} moonshot, {len(ct)} contrarian, {len(of)} order_failed activos")
+            return sl, ms, ct, of
         except Exception as e:
             print(f"[Cooldowns] ⚠️  Error cargando: {e}")
-            return {}, {}, {}
+            return {}, {}, {}, {}
 
-    def save_cooldowns(sl: dict, ms: dict, ct: dict = None):
+    def save_cooldowns(sl: dict, ms: dict, ct: dict = None, of: dict = None):
         """Persiste cooldowns activos a fichero."""
         try:
             data = {
-                "stop_loss":  {k: v.isoformat() for k, v in sl.items()},
-                "moonshot":   {k: v.isoformat() for k, v in ms.items()},
-                "contrarian": {k: v.isoformat() for k, v in (ct or {}).items()},
-                "saved_at":   datetime.now().isoformat()
+                "stop_loss":    {k: v.isoformat() for k, v in sl.items()},
+                "moonshot":     {k: v.isoformat() for k, v in ms.items()},
+                "contrarian":   {k: v.isoformat() for k, v in (ct or {}).items()},
+                "order_failed": {k: v.isoformat() for k, v in (of or {}).items()},
+                "saved_at":     datetime.now().isoformat()
             }
             with open(COOLDOWNS_FILE, "w") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
             print(f"[Cooldowns] ⚠️  Error guardando: {e}")
 
-    stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns = load_cooldowns()
+    stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns = load_cooldowns()
 
     # ==============================================================================
     # 🔒 TRADE LOCK: Evitar trades duplicados en el mismo ciclo
@@ -354,6 +357,11 @@ def run():
                             if datetime.now() < stop_loss_cooldowns[b['bucket']]: continue
                             else: del stop_loss_cooldowns[b['bucket']]
 
+                        _order_key = f"{m_poly['title']}|{b['bucket']}"
+                        if _order_key in order_failed_cooldowns:
+                            if datetime.now() < order_failed_cooldowns[_order_key]: continue
+                            else: del order_failed_cooldowns[_order_key]
+
                         bid, ask = b.get('bid',0), b.get('ask',0)
 
                         if bid <= MIN_BID_FOR_PROCESSING and p_hours_left > 2.0: continue
@@ -394,11 +402,11 @@ def run():
                                             if res:
                                                 save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                 moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXPIRED_HOURS)
-                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns)
                                                 executed_trades_this_cycle.add(trade_key)
                                             else:
                                                 stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
-                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns)
                                             continue
 
                                         if bid >= MOONSHOT_EXIT_VICTORY_PRICE:
@@ -412,7 +420,7 @@ def run():
                                                 executed_trades_this_cycle.add(trade_key)
                                             else:
                                                 stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
-                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns)
                                             continue
 
                                         if MOONSHOT_EXIT_PARTIAL_MIN_PRICE <= bid <= MOONSHOT_EXIT_PARTIAL_MAX_PRICE and profit_pct >= MOONSHOT_EXIT_PARTIAL_MIN_PROFIT:
@@ -426,7 +434,7 @@ def run():
                                                 executed_trades_this_cycle.add(trade_key)
                                             else:
                                                 stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
-                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns)
                                             continue
 
                                     current_max = pos_data.get('max_price_seen', entry)
@@ -448,11 +456,11 @@ def run():
                                                 if res:
                                                     save_trade_snapshot("SMART_ROTATE", m_poly['title'], b['bucket'], bid, reason, {"z": z_score, "pnl": profit_pct}, hours_left=p_hours_left, tweet_count=p_count)
                                                     moonshot_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_MOONSHOT_EXIT_HOURS)
-                                                    save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
+                                                    save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns)
                                                     executed_trades_this_cycle.add(trade_key)
                                                 else:
                                                     stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
-                                                    save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
+                                                    save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns)
                                             continue
                                     continue
 
@@ -473,7 +481,7 @@ def run():
                                                 executed_trades_this_cycle.add(trade_key)
                                             else:
                                                 stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
-                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns)
                                         # Victory lap: precio casi seguro ganador en últimas horas
                                         elif m_poly['hours'] <= VICTORY_LAP_TIME_HOURS and bid > VICTORY_LAP_PRICE:
                                             action = "ROTATE"; reason = f"CTR Victory Lap (${bid:.2f})"
@@ -486,7 +494,7 @@ def run():
                                                 executed_trades_this_cycle.add(trade_key)
                                             else:
                                                 stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
-                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns)
                                     continue  # sin stop loss, sin timeouts — aguantar hasta resolución
 
                                 should_sell = False; sell_reason = ""
@@ -596,12 +604,12 @@ def run():
                                             # Persistir stop_loss_cooldown si aplica
                                             if "Stop Loss" in sell_reason or "Catastrophic" in sell_reason or "Emergency" in sell_reason or "Panic" in sell_reason:
                                                 stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(hours=COOLDOWN_STOP_LOSS_HOURS)
-                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
+                                                save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns)
                                             executed_trades_this_cycle.add(trade_key)  # Mark as executed
                                         else:
                                             # SELL falló — cooldown para evitar loop infinito de reintentos
                                             stop_loss_cooldowns[b['bucket']] = datetime.now() + timedelta(minutes=COOLDOWN_SELL_FAILED_MINUTES)
-                                            save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns)
+                                            save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns)
 
                         elif not owned and not IS_WARMUP:
                             bucket_headroom = b['max'] - m_poly['count']
@@ -641,6 +649,9 @@ def run():
                                         if res:
                                             save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"scenario": matches_scenario, "z": z_score}, hours_left=p_hours_left, tweet_count=p_count)
                                             executed_trades_this_cycle.add(trade_key)
+                                        else:
+                                            order_failed_cooldowns[_order_key] = datetime.now() + timedelta(minutes=COOLDOWN_ORDER_FAILED_MINUTES)
+                                            save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns)
                                 continue  # SPREAD mode done, skip PRECISION logic below
 
                             # PRECISION mode: Standard entry logic
@@ -721,6 +732,9 @@ def run():
                                                 if res:
                                                     save_trade_snapshot("BUY", m_poly['title'], b['bucket'], ask, reason, {"z": z_score, "fair": fair}, hours_left=p_hours_left, tweet_count=p_count)
                                                     executed_trades_this_cycle.add(trade_key)  # Mark as executed
+                                                else:
+                                                    order_failed_cooldowns[_order_key] = datetime.now() + timedelta(minutes=COOLDOWN_ORDER_FAILED_MINUTES)
+                                                    save_cooldowns(stop_loss_cooldowns, moonshot_cooldowns, contrarian_cooldowns, order_failed_cooldowns)
                                             else:
                                                 action = "-"; reason = "Already executed this cycle"
                                         else:
@@ -776,7 +790,7 @@ def run():
             # 🌑 LLAMADA AL SATÉLITE MOONSHOT (AL FINAL DEL CICLO)
             # ==================================================================
             try:
-                ejecutar_moonshot_satelite(trader, m_poly, m_clob, p_count, p_avg_hist, p_hours_left, moonshot_cooldowns)
+                ejecutar_moonshot_satelite(trader, m_poly, m_clob, p_count, p_avg_hist, p_hours_left, moonshot_cooldowns, order_failed_cooldowns)
             except: pass
             
             # ==================================================================
