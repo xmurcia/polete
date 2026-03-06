@@ -1,0 +1,10 @@
+# Virtual environment
+venv/
+*.pyc
+__pycache__/
+
+# Credentials cache
+.credentials.json
+
+# Environment variables (parent directory)
+../.env
