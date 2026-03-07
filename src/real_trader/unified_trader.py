@@ -86,6 +86,10 @@ class UnifiedTrader:
         # Expires after 5 minutes (well past API propagation lag of ~30s).
         self._pending_buy_token_ids: Dict[str, float] = {}
 
+        # No-balance cooldown: if the API returns "not enough balance/allowance",
+        # stop attempting BUYs for 1 hour to avoid spamming failed orders.
+        self._no_balance_cooldown_until: float = 0.0  # unix timestamp
+
         if use_real:
             print("[UnifiedTrader] 🔴 REAL TRADING MODE - Using real money!")
             self.auth = PolyAuth()
@@ -216,7 +220,15 @@ class UnifiedTrader:
 
         # --- BUY Logic ---
         if "BUY" in signal or "HEDGE" in signal:
-            # 0. Get token_id FIRST (before position check)
+            # 0a. Check no-balance cooldown (1h after API "not enough balance/allowance")
+            import time as _time
+            _now_nb = _time.time()
+            if _now_nb < self._no_balance_cooldown_until:
+                _remaining = int(self._no_balance_cooldown_until - _now_nb)
+                print(f"[UnifiedTrader] ⏳ No-balance cooldown active — skipping BUY ({_remaining}s remaining)")
+                return None
+
+            # 0b. Get token_id FIRST (before position check)
             token_id = await self._resolve_token_id(market_title, bucket, side="YES")
             if not token_id:
                 error_msg = f"Could not resolve token_id for {market_title} {bucket}"
@@ -419,6 +431,20 @@ class UnifiedTrader:
             else:
                 print(f"[UnifiedTrader] ❌ Order failed: {result.error}")
                 self._log_error(f"BUY order failed: {result.error}", context=f"{market_title} {bucket} @ ${price:.3f}")
+                # If the API reports insufficient balance/allowance, impose a 1-hour
+                # cooldown so the bot stops hammering failed BUY orders every 8 seconds.
+                _err_str = str(result.error).lower()
+                if "not enough balance" in _err_str or "allowance" in _err_str:
+                    import time as _time
+                    _cooldown_secs = 3600  # 1 hour
+                    self._no_balance_cooldown_until = _time.time() + _cooldown_secs
+                    print(f"[UnifiedTrader] ⏳ BUY cooldown set: no BUYs for {_cooldown_secs // 60} min (balance/allowance error)")
+                    if self.telegram and self.use_real:
+                        self.telegram.notify_error(
+                            f"⏳ BUY cooldown activado por 1 hora — balance/allowance insuficiente. "
+                            f"Próximo intento a las {__import__('datetime').datetime.now().strftime('%H:%M')} + 1h",
+                            context="No-balance cooldown"
+                        )
                 if self.telegram and self.use_real:
                     self.telegram.notify_order_failed(
                         market=market_title,
