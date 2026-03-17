@@ -1,10 +1,9 @@
 """
 signal_bot.py  —  Sistema autónomo de señales D3 + Paper Trading
 =================================================================
-Fixes v3:
-  - scrape no sobreescribe cache: hace merge con datos existentes
-  - poll 15 min (era 60)
-  - burst detector integrado como hilo paralelo (Nitter RSS)
+Fixes v4:
+  - burst monitor: xtracker delta (Nitter eliminado — no funciona desde Railway)
+  - Paranoid Treasure: exit ≥80% solo en últimas 48h (deja correr antes)
 """
 
 import os, json, math, time, re, sys, threading
@@ -39,19 +38,17 @@ except Exception as _e:
     print(f"ℹ️  [DB] No disponible ({_e})")
 
 # ── Constantes ──────────────────────────────────────────────────────────
-HIST_MEAN      = 343
-HIST_SIGMA     = 72
-CAPITAL_INIT   = 100.0
-RISK_PER_RANGE = 0.08
-POLL_MINUTES   = 15          # ← bajado de 60 a 15
-BURST_POLL_SEC = 120         # burst monitor cada 2 min
-BURST_THRESHOLD = 4.0        # tweets/hora para alertar
-XTRACKER_API   = "https://xtracker.polymarket.com/api"
-HDR            = {"User-Agent": "Mozilla/5.0"}
-MONTH_NAMES    = ["january","february","march","april","may","june",
-                  "july","august","september","october","november","december"]
-NITTER_MIRRORS = ["https://nitter.privacydev.net", "https://nitter.poast.org",
-                  "https://nitter.net"]
+HIST_MEAN       = 343
+HIST_SIGMA      = 72
+CAPITAL_INIT    = 100.0
+RISK_PER_RANGE  = 0.08
+POLL_MINUTES    = 15
+BURST_POLL_SEC  = 120         # burst monitor cada 2 min
+BURST_THRESHOLD = 4.0         # tweets/hora para alertar
+XTRACKER_API    = "https://xtracker.polymarket.com/api"
+HDR             = {"User-Agent": "Mozilla/5.0"}
+MONTH_NAMES     = ["january","february","march","april","may","june",
+                   "july","august","september","october","november","december"]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -168,7 +165,7 @@ class Telegram:
         self.send(f"🤖 <b>Signal Bot arrancado</b>\n"
                   f"  Capital paper: <b>${capital:.2f}</b>\n"
                   f"  Poll señales:  cada {POLL_MINUTES} min\n"
-                  f"  Burst monitor: cada {BURST_POLL_SEC}s\n"
+                  f"  Burst monitor: cada {BURST_POLL_SEC}s (xtracker delta)\n"
                   f"  DB: {'✅ PostgreSQL' if _DB_OK else '📁 JSON local'}\n"
                   f"  {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
@@ -182,85 +179,76 @@ class Telegram:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# BURST MONITOR  (hilo paralelo, Nitter RSS)
+# BURST MONITOR  (hilo paralelo — xtracker delta)
+# Nitter no funciona desde Railway. Usamos xtracker: comparamos el
+# total acumulado entre polls de 2 min. Si pace > BURST_THRESHOLD → alerta.
+# Heartbeat en log cada 10 ciclos (~20 min) para confirmar que está vivo.
 # ══════════════════════════════════════════════════════════════════════
 
-_burst_seen_ids   = set()
-_burst_buffer     = []   # (datetime, text)
-_last_burst_alert = None
-_mirror_idx       = 0
-
-
-def _fetch_nitter_tweets() -> list:
-    """Fetch latest Elon tweets via Nitter RSS. Returns list of (id, text, dt)."""
-    global _mirror_idx
-    for _ in range(len(NITTER_MIRRORS)):
-        mirror = NITTER_MIRRORS[_mirror_idx % len(NITTER_MIRRORS)]
-        try:
-            r = requests.get(f"{mirror}/elonmusk/rss",
-                             headers=HDR, timeout=8)
-            items = re.findall(r'<item>(.*?)</item>', r.text, re.DOTALL)
-            result = []
-            for item in items:
-                id_m  = re.search(r'<guid[^>]*>(.*?)</guid>', item)
-                txt_m = re.search(r'<title><!\[CDATA\[(.*?)\]\]></title>',
-                                  item, re.DOTALL)
-                dt_m  = re.search(r'<pubDate>(.*?)</pubDate>', item)
-                tid   = id_m.group(1).strip() if id_m else ""
-                if not tid or tid in _burst_seen_ids:
-                    continue
-                text = re.sub(r'<[^>]+>', '', txt_m.group(1) if txt_m else "")
-                try:
-                    dt = datetime.strptime(dt_m.group(1).strip(),
-                                           "%a, %d %b %Y %H:%M:%S %Z"
-                                           ).replace(tzinfo=timezone.utc)
-                except:
-                    dt = datetime.now(tz=timezone.utc)
-                result.append((tid, text[:200], dt))
-            return result
-        except Exception as e:
-            log(f"[BURST] Nitter {mirror} falló: {e}")
-            _mirror_idx += 1
-    return []
+_burst_prev_totals = {}   # tid → (total, datetime)
+_last_burst_alert  = None
 
 
 def burst_monitor_loop(tg: Telegram, get_events_fn):
-    """Hilo paralelo: detecta bursts de tweets de Elon."""
-    global _last_burst_alert, _mirror_idx
-    log("[BURST] Monitor iniciado")
+    global _last_burst_alert
+    log("[BURST] Monitor iniciado — xtracker delta")
+    cycle = 0
 
     while True:
         try:
-            new_tweets = _fetch_nitter_tweets()
             now = datetime.now(tz=timezone.utc)
+            r   = requests.get(f"{XTRACKER_API}/users/elonmusk",
+                               headers=HDR, timeout=15)
+            r.raise_for_status()
+            data      = r.json()
+            trackings = (data.get("data", {}).get("trackings", [])
+                         if isinstance(data.get("data"), dict)
+                         else data.get("trackings", []))
 
-            for tid, text, dt in new_tweets:
-                _burst_seen_ids.add(tid)
-                _burst_buffer.append((dt, text))
+            max_pace    = 0.0
+            burst_label = ""
 
-            # Mantener solo últimos 30 min
-            cutoff = now - timedelta(minutes=30)
-            while _burst_buffer and _burst_buffer[0][0] < cutoff:
-                _burst_buffer.pop(0)
+            for t in trackings:
+                tid   = t.get("id", "")
+                title = t.get("title", "")
+                if not tid or "tweet" not in title.lower():
+                    continue
+                try:
+                    r2    = requests.get(
+                        f"{XTRACKER_API}/trackings/{tid}?includeStats=true",
+                        headers=HDR, timeout=10)
+                    total = int(r2.json().get("data", {})
+                                .get("stats", {}).get("total", 0))
+                except Exception:
+                    continue
 
-            # Calcular pace en ventana de 10 min
-            window_10 = now - timedelta(minutes=10)
-            recent    = [(dt, t) for dt, t in _burst_buffer if dt >= window_10]
-            pace      = len(recent) / (10 / 60)  # tweets/hora
+                if tid in _burst_prev_totals:
+                    prev_total, prev_ts = _burst_prev_totals[tid]
+                    delta    = max(0, total - prev_total)
+                    interval = (now - prev_ts).total_seconds() / 3600
+                    if 0 < interval < 1:   # solo polls recientes
+                        pace = delta / interval
+                        if pace > max_pace:
+                            max_pace    = pace
+                            burst_label = title
 
-            if pace >= BURST_THRESHOLD:
+                _burst_prev_totals[tid] = (total, now)
+
+            # Heartbeat cada 10 ciclos (~20 min)
+            cycle += 1
+            if cycle % 10 == 0:
+                log(f"[BURST] heartbeat — max_pace={max_pace:.1f}/h  "
+                    f"trackings={len(trackings)}")
+
+            if max_pace >= BURST_THRESHOLD:
                 cooldown_ok = (_last_burst_alert is None or
                                (now - _last_burst_alert).total_seconds() > 1200)
-                if cooldown_ok and recent:
+                if cooldown_ok:
                     _last_burst_alert = now
-                    examples = [t for _, t in recent[:2]]
-                    log(f"[BURST] 🔥 pace={pace:.0f}/h  {len(recent)} tweets en 10min")
-                    tg.burst_alert(
-                        label="Elon Musk",
-                        pace=pace,
-                        n_tweets=len(recent),
-                        examples=examples
-                    )
+                    log(f"[BURST] 🔥 pace={max_pace:.0f}/h  {burst_label[:50]}")
+                    tg.burst_alert(label=burst_label, pace=max_pace,
+                                   n_tweets=0, examples=[])
+
         except Exception as e:
             log(f"[BURST] Error: {e}")
 
@@ -284,7 +272,7 @@ def scrape_tweets(event: dict, state: dict) -> dict:
         result = _muskmeter(event)
         if result:
             log(f"[SCRAPE] muskmeter OK: {len(result)} días")
-            merged = {**existing, **result}   # merge, muskmeter gana en conflictos
+            merged = {**existing, **result}
             return merged
     except Exception as e:
         log(f"[SCRAPE] muskmeter falló: {e}")
@@ -296,16 +284,14 @@ def scrape_tweets(event: dict, state: dict) -> dict:
             now_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:00")
             snaps = state.setdefault("xtracker_snapshots", {}).setdefault(slug, {})
             snaps[now_str] = total
-            # Reconstruir solo los días sin datos en el cache existente
             fresh_days = _daily_from_snapshots(snaps, event["start"])
-            merged = {**fresh_days, **existing}  # existing tiene prioridad
+            merged = {**fresh_days, **existing}
             if merged:
                 log(f"[SCRAPE] xtracker OK: total={total}  cache+snap={len(merged)} días")
                 return merged
     except Exception as e:
         log(f"[SCRAPE] xtracker falló: {e}")
 
-    # Fallback: devolver lo que hay en cache
     if existing:
         log(f"[SCRAPE] usando cache ({len(existing)} días)")
         return existing
@@ -641,18 +627,29 @@ class PaperBook:
             pct   = (cp - pos["entry"]) / pos["entry"]
             h_rem = h_slug.get(pos["slug"], 100)
             reason, exit_p = None, cp
+
+            # Victory Lap: precio casi resuelto en las últimas 48h
             if h_rem <= 48 and cp >= 0.97:
                 reason = f"Victory Lap ({cp:.2f})"
+            # Paranoid Treasure: beneficio ≥ 80% en las últimas 48h
+            # Fuera de esa ventana dejamos correr las ganancias
+            elif h_rem <= 48 and pct >= 0.80:
+                reason = f"Paranoid Treasure (+{pct*100:.0f}%)"
+            # Stop Loss
             elif pos["entry"] < 0.15 and pct < -0.80:
                 reason = f"Stop Loss ({pct*100:.0f}%)"
             elif pos["entry"] >= 0.15 and pct < -0.40:
                 reason = f"Stop Loss ({pct*100:.0f}%)"
+            # Evento expirado
             elif h_rem < -2:
                 reason, exit_p = "Evento expirado", max(cp, 0.01)
+            # Prune final: precio irrecuperable en últimas 24h
             elif h_rem <= 24 and cp < 0.05:
                 reason = f"Prune final ({cp*100:.1f}¢)"
+
             if reason:
                 to_close.append((pos_id, pos, exit_p, reason))
+
         for pos_id, pos, exit_p, reason in to_close:
             pnl = (exit_p - pos["entry"]) * pos["shares"]
             self.data["capital"] += exit_p * pos["shares"]
@@ -753,7 +750,6 @@ def main():
                 slug  = ev["slug"]
                 day_n = ev["day_n"]
 
-                # MERGE: scrape_tweets ya combina nuevo con cache
                 fresh = scrape_tweets(ev, state)
                 if fresh:
                     state["muskmeter"][slug] = fresh
