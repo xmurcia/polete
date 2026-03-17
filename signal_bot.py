@@ -1,22 +1,13 @@
 """
 signal_bot.py  —  Sistema autónomo de señales D3 + Paper Trading
 =================================================================
-Completamente autónomo:
-  - Scrapa xtracker/muskmeter automáticamente cada hora
-  - Detecta eventos activos (Mar→Mar y Vie→Vie en paralelo)
-  - Genera señales en D3-D5 con modelo pace+DdS+reglas
-  - Ejecuta paper trades automáticamente
-  - Persiste en PostgreSQL con mode='SIGNAL_PAPER'
-    (separado del bot real, que usa mode='REAL')
-  - Envía señales, compras, cierres y resumen semanal a Telegram
+Reutiliza PolymarketSensor y ClobMarketScanner del bot existente.
+Paper trading en PostgreSQL con mode=SIGNAL_PAPER.
 
-Uso:
-  python signal_bot.py
-
-Variables .env (las mismas del bot):
-  TELEGRAM_BOT_TOKEN=xxx
-  TELEGRAM_CHAT_ID=xxx        (canal @nombre o chat_id numérico)
-  DATABASE_URL=postgresql://  (ya está en tu .env)
+Fixes aplicados:
+  - xtracker matching por fecha inicio específica (mes+día)
+  - muskmeter URL con timestamps Unix correctos
+  - scrape_tweets pasa event dict completo (no solo slug)
 """
 
 import os, json, math, time, re, sys
@@ -29,16 +20,19 @@ load_dotenv()
 
 # ── Rutas ──────────────────────────────────────────────────────────────
 ROOT        = Path(__file__).parent
-SIGNALS_DIR = ROOT / "signals"
-SIGNALS_DIR.mkdir(exist_ok=True)
+LOGS_DIR = ROOT / "logs" / "signals"
+LOGS_DIR.mkdir(exist_ok=True)
 
-STATE_FILE = SIGNALS_DIR / "signal_bot_state.json"
-PAPER_FILE = SIGNALS_DIR / "paper_portfolio.json"
-LOG_FILE   = SIGNALS_DIR / "signal_bot.log"
+STATE_FILE = LOGS_DIR / "signal_bot_state.json"
+PAPER_FILE = LOGS_DIR / "paper_portfolio.json"
+LOG_FILE   = LOGS_DIR / "signal_bot.log"
 
-# ── DB (reutiliza database.py del bot existente) ────────────────────────
-try:
+# ── sys.path para imports del bot ───────────────────────────────────────
+if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# ── DB ──────────────────────────────────────────────────────────────────
+try:
     import database as _db
     import psycopg2.extras as _pge
     _DB_OK = _db._pool is not None
@@ -55,13 +49,13 @@ except Exception as _e:
 # ── Constantes ──────────────────────────────────────────────────────────
 HIST_MEAN      = 343
 HIST_SIGMA     = 72
-DOW_MULT       = {"Mon":1.00,"Tue":0.80,"Wed":1.08,"Thu":1.38,
-                  "Fri":0.75,"Sat":1.08,"Sun":1.14}
 CAPITAL_INIT   = 100.0
-RISK_PER_RANGE = 0.08      # 8% del capital por rango del spread
-POLL_MINUTES   = 60        # frecuencia de scraping y señales
-GAMMA_API      = "https://gamma-api.polymarket.com"
+RISK_PER_RANGE = 0.08
+POLL_MINUTES   = 60
+XTRACKER_API   = "https://xtracker.polymarket.com/api"
 HDR            = {"User-Agent": "Mozilla/5.0"}
+MONTH_NAMES    = ["january","february","march","april","may","june",
+                  "july","august","september","october","november","december"]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -85,7 +79,7 @@ class Telegram:
         self.token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
         self.ok      = bool(self.token and self.chat_id)
-        log(f"[TG] {'✅ activado' if self.ok else '⚠️  desactivado (falta token/chat_id)'}")
+        log(f"[TG] {'✅ activado' if self.ok else '⚠️  desactivado'}")
 
     def send(self, msg: str, silent=False) -> bool:
         if not self.ok:
@@ -104,130 +98,189 @@ class Telegram:
     def signal_entry(self, label, day_n, ranges, prices, proj, ev, confidence):
         cost = sum(prices.get(r, 0.05) for r in ranges)
         roi  = (1 / cost - 1) * 100 if cost > 0 else 0
-        lines = [
-            f"📊 <b>SEÑAL D{day_n} — {label}</b>", "",
-            f"🎯 <b>SPREAD YES — {len(ranges)} rangos</b>",
-        ]
+        lines = [f"📊 <b>SEÑAL D{day_n} — {label}</b>", "",
+                 f"🎯 <b>SPREAD YES — {len(ranges)} rangos</b>"]
         for rng in ranges:
             lines.append(f"  • YES <b>{rng}</b>  →  {prices.get(rng,0)*100:.1f}¢")
-        lines += [
-            "",
-            f"💰 Coste total:    <b>{cost*100:.1f}¢</b> por $1",
-            f"📈 ROI si gana:    <b>+{roi:.0f}%</b>",
-            f"🔮 Proyección:     <b>{proj} tweets</b>",
-            f"⚡ EV esperado:    <b>{ev*100:+.0f}%</b>",
-            f"🎲 Confianza:      <b>{confidence}</b>",
-            "",
-            f"⏰ {datetime.now().strftime('%d/%m %H:%M')} UTC",
-        ]
+        lines += ["",
+                  f"💰 Coste total:    <b>{cost*100:.1f}¢</b> por $1",
+                  f"📈 ROI si gana:    <b>+{roi:.0f}%</b>",
+                  f"🔮 Proyección:     <b>{proj} tweets</b>",
+                  f"⚡ EV esperado:    <b>{ev*100:+.0f}%</b>",
+                  f"🎲 Confianza:      <b>{confidence}</b>",
+                  "",
+                  f"⏰ {datetime.now().strftime('%d/%m %H:%M')} UTC"]
         self.send("\n".join(lines))
 
     def paper_buy(self, label, rng, price, amount, capital_left):
-        self.send(
-            f"📄 <b>PAPER BUY</b>\n"
-            f"  Evento: {label}\n"
-            f"  Rango:  <b>{rng}</b>  @ {price*100:.1f}¢\n"
-            f"  Monto:  <b>${amount:.2f}</b>\n"
-            f"  Capital: ${capital_left:.2f}",
-            silent=True)
+        self.send(f"📄 <b>PAPER BUY</b>\n"
+                  f"  Evento: {label}\n"
+                  f"  Rango:  <b>{rng}</b>  @ {price*100:.1f}¢\n"
+                  f"  Monto:  <b>${amount:.2f}</b>\n"
+                  f"  Capital: ${capital_left:.2f}", silent=True)
 
     def paper_close(self, label, rng, entry, exit_p, pnl, reason):
         emoji = "✅" if pnl >= 0 else "❌"
         roi   = (exit_p - entry) / entry * 100 if entry > 0 else 0
-        self.send(
-            f"{emoji} <b>PAPER CLOSE</b> — {label}\n"
-            f"  Rango:   <b>{rng}</b>\n"
-            f"  {entry*100:.1f}¢ → {exit_p*100:.1f}¢  ({roi:+.0f}%)\n"
-            f"  P&amp;L: <b>${pnl:+.2f}</b>  |  {reason}")
+        self.send(f"{emoji} <b>PAPER CLOSE</b> — {label}\n"
+                  f"  Rango:   <b>{rng}</b>\n"
+                  f"  {entry*100:.1f}¢ → {exit_p*100:.1f}¢  ({roi:+.0f}%)\n"
+                  f"  P&amp;L: <b>${pnl:+.2f}</b>  |  {reason}")
 
     def portfolio_summary(self, capital, positions, stats):
         roi = (capital - CAPITAL_INIT) / CAPITAL_INIT * 100
         w, l = stats["wins"], stats["losses"]
         total = w + l
         wr = 100 * w / total if total else 0
-        lines = [
-            "📊 <b>Portfolio — SIGNAL PAPER</b>", "",
-            f"  💵 Capital:     <b>${capital:.2f}</b>  (ROI {roi:+.1f}%)",
-            f"  📈 Trades:      {total}  ({w}✅ {l}❌)  {wr:.0f}% WR",
-            f"  💰 P&amp;L:     <b>${stats.get('pnl', 0):+.2f}</b>", "",
-        ]
+        lines = ["📊 <b>Portfolio — SIGNAL PAPER</b>", "",
+                 f"  💵 Capital:     <b>${capital:.2f}</b>  (ROI {roi:+.1f}%)",
+                 f"  📈 Trades:      {total}  ({w}✅ {l}❌)  {wr:.0f}% WR",
+                 f"  💰 P&amp;L:     <b>${stats.get('pnl', 0):+.2f}</b>", ""]
         if positions:
             lines.append("  <b>Abiertas:</b>")
             for p in positions[:8]:
-                ep  = p.get("entry", 0)
-                cp  = p.get("current_price", ep)
-                pnl = (cp - ep) * p.get("shares", 0)
-                lines.append(
-                    f"    {p['rng']:10}  {ep*100:.0f}¢→{cp*100:.0f}¢  ${pnl:+.2f}")
+                ep = p.get("entry", 0)
+                cp = p.get("current_price", ep)
+                lines.append(f"    {p['rng']:10}  {ep*100:.0f}¢→{cp*100:.0f}¢  ${(cp-ep)*p.get('shares',0):+.2f}")
         lines.append(f"\n  ⏰ {datetime.now().strftime('%d/%m %H:%M')}")
         self.send("\n".join(lines))
 
     def weekly_summary(self, capital, stats):
         roi = (capital - CAPITAL_INIT) / CAPITAL_INIT * 100
         w, l = stats["wins"], stats["losses"]
-        total = w + l
-        wr = 100 * w / total if total else 0
-        self.send(
-            f"📅 <b>RESUMEN SEMANAL</b>\n\n"
-            f"  Señales:   {stats['signals']}\n"
-            f"  Trades:    {stats['trades']}\n"
-            f"  Win rate:  {wr:.0f}%  ({w}W / {l}L)\n"
-            f"  P&amp;L:   <b>${stats.get('pnl',0):+.2f}</b>\n"
-            f"  Capital:   <b>${capital:.2f}</b>  (inicio ${CAPITAL_INIT:.0f})\n"
-            f"  ROI total: <b>{roi:+.1f}%</b>\n\n"
-            f"  ⏰ {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+        wr = 100 * w / (w + l) if (w + l) else 0
+        self.send(f"📅 <b>RESUMEN SEMANAL</b>\n\n"
+                  f"  Señales:   {stats['signals']}\n"
+                  f"  Trades:    {stats['trades']}\n"
+                  f"  Win rate:  {wr:.0f}%  ({w}W / {l}L)\n"
+                  f"  P&amp;L:   <b>${stats.get('pnl',0):+.2f}</b>\n"
+                  f"  Capital:   <b>${capital:.2f}</b>  (inicio ${CAPITAL_INIT:.0f})\n"
+                  f"  ROI total: <b>{roi:+.1f}%</b>\n\n"
+                  f"  ⏰ {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+
+    def scrape_warning(self, label, day_n):
+        self.send(f"⚠️ <b>Sin datos tweets D{day_n}</b>\n  {label}", silent=True)
 
     def bot_start(self, capital):
-        self.send(
-            f"🤖 <b>Signal Bot arrancado</b>\n"
-            f"  Capital paper: <b>${capital:.2f}</b>\n"
-            f"  Poll: cada {POLL_MINUTES} min\n"
-            f"  DB: {'✅ PostgreSQL (SIGNAL_PAPER)' if _DB_OK else '📁 JSON local'}\n"
-            f"  {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+        self.send(f"🤖 <b>Signal Bot arrancado</b>\n"
+                  f"  Capital paper: <b>${capital:.2f}</b>\n"
+                  f"  Poll: cada {POLL_MINUTES} min\n"
+                  f"  DB: {'✅ PostgreSQL (SIGNAL_PAPER)' if _DB_OK else '📁 JSON local'}\n"
+                  f"  {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
     def bot_stop(self, capital, stats):
         roi = (capital - CAPITAL_INIT) / CAPITAL_INIT * 100
         w, l = stats["wins"], stats["losses"]
-        total = w + l
-        wr = 100 * w / total if total else 0
-        self.send(
-            f"🛑 <b>Signal Bot detenido</b>\n"
-            f"  Capital: <b>${capital:.2f}</b>  (ROI {roi:+.1f}%)\n"
-            f"  Win rate: {wr:.0f}%  ({w}W/{l}L)")
+        wr = 100 * w / (w + l) if (w + l) else 0
+        self.send(f"🛑 <b>Signal Bot detenido</b>\n"
+                  f"  Capital: <b>${capital:.2f}</b>  (ROI {roi:+.1f}%)\n"
+                  f"  Win rate: {wr:.0f}%  ({w}W/{l}L)")
 
 
 # ══════════════════════════════════════════════════════════════════════
-# SCRAPING  (xtracker primero, muskmeter como fallback)
+# SCRAPING DE TWEETS
 # ══════════════════════════════════════════════════════════════════════
 
-def scrape_tweets(start_date: str) -> dict:
+def scrape_tweets(event: dict, state: dict) -> dict:
     """
-    Obtiene tweets diarios del evento automáticamente.
+    Obtiene tweets diarios del evento.
+    Intenta muskmeter primero, luego xtracker con snapshots acumulativos.
     Returns: {"2026-03-13": 23, "2026-03-14": 37, ...}
     """
-    try:
-        result = _xtracker(start_date)
-        if result:
-            log(f"[SCRAPE] xtracker OK: {len(result)} días desde {start_date}")
-            return result
-    except Exception as e:
-        log(f"[SCRAPE] xtracker falló: {e}")
+    slug = event["slug"]
 
+    # Método 1: muskmeter
     try:
-        result = _muskmeter_html(start_date)
+        result = _muskmeter(event)
         if result:
-            log(f"[SCRAPE] muskmeter HTML OK: {len(result)} días")
+            log(f"[SCRAPE] muskmeter OK: {len(result)} días → {result}")
             return result
     except Exception as e:
         log(f"[SCRAPE] muskmeter falló: {e}")
 
+    # Método 2: xtracker snapshot acumulativo
+    try:
+        total = _xtracker_total(event)
+        if total is not None and total > 0:
+            now_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:00")
+            snaps = state.setdefault("xtracker_snapshots", {}).setdefault(slug, {})
+            snaps[now_str] = total
+            result = _daily_from_snapshots(snaps, event["start"])
+            if result:
+                log(f"[SCRAPE] xtracker OK: total={total} → {result}")
+                return result
+    except Exception as e:
+        log(f"[SCRAPE] xtracker falló: {e}")
+
     return {}
 
 
-def _xtracker(start_date: str) -> dict:
-    r = requests.get(
-        "https://xtracker.polymarket.com/api/users/elonmusk",
-        headers=HDR, timeout=15)
+def _muskmeter(event: dict) -> dict:
+    """
+    Scrapa muskmeter.live con URL real:
+    ?start=TS&end=TS&eventId=ID&eventType=weekly&source=3
+    """
+    start_ts = event.get("start_ts")
+    end_ts   = event.get("end_ts")
+    event_id = event.get("event_id", "")
+
+    if not start_ts or not end_ts:
+        s = datetime.strptime(event["start"], "%Y-%m-%d").replace(hour=17, tzinfo=timezone.utc)
+        e = datetime.strptime(event["end"],   "%Y-%m-%d").replace(hour=17, tzinfo=timezone.utc)
+        start_ts, end_ts = int(s.timestamp()), int(e.timestamp())
+
+    url = (f"https://www.muskmeter.live/"
+           f"?start={start_ts}&end={end_ts}"
+           f"&eventId={event_id}&eventType=weekly&source=3")
+    log(f"[SCRAPE] muskmeter URL: {url}")
+
+    r = requests.get(url, headers={**HDR, "Accept": "text/html",
+                                   "Referer": "https://www.muskmeter.live/"},
+                     timeout=20)
+    r.raise_for_status()
+
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+                  r.text, re.DOTALL)
+    if m:
+        nd    = json.loads(m.group(1))
+        props = nd.get("props", {}).get("pageProps", {}) or {}
+        daily = (props.get("dailyData") or props.get("heatmapData") or
+                 props.get("dailyCounts") or props.get("tweetsByDay") or {})
+        if isinstance(daily, dict) and daily:
+            result = {k: int(v) for k, v in daily.items()
+                      if re.match(r'\d{4}-\d{2}-\d{2}', str(k))}
+            if result:
+                return result
+
+    # Fallback: buscar patrones de fecha en HTML
+    matches = re.findall(r'"(\d{4}-\d{2}-\d{2})"\s*:\s*(\d+)', r.text)
+    if matches:
+        start_dt = datetime.strptime(event["start"], "%Y-%m-%d")
+        return {d: int(c) for d, c in matches
+                if abs((datetime.strptime(d, "%Y-%m-%d") - start_dt).days) <= 10}
+
+    return {}
+
+
+def _xtracker_total(event: dict) -> int | None:
+    """
+    Obtiene total acumulado desde xtracker.
+    MATCH ESPECÍFICO: busca el mes y día de inicio del evento en el título
+    del tracking para evitar matchear el evento equivocado.
+
+    Ejemplo: para start="2026-03-13" busca "march 13" en el título.
+    "Elon Musk # tweets March 20 - March 27" NO contiene "march 13" → no match ✓
+    """
+    try:
+        start_dt    = datetime.strptime(event["start"], "%Y-%m-%d")
+        start_month = MONTH_NAMES[start_dt.month - 1]   # "march"
+        start_day   = str(start_dt.day)                  # "13"
+        search_str  = f"{start_month} {start_day}"       # "march 13"
+    except Exception as e:
+        log(f"[XTRACKER] Error parsing start date: {e}")
+        return None
+
+    r = requests.get(f"{XTRACKER_API}/users/elonmusk", headers=HDR, timeout=15)
     r.raise_for_status()
     data = r.json()
 
@@ -235,138 +288,149 @@ def _xtracker(start_date: str) -> dict:
                  if isinstance(data.get("data"), dict)
                  else data.get("trackings", []))
 
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    target = None
     for t in trackings:
-        try:
-            ts = datetime.fromisoformat(
-                t.get("startDate", "").replace("Z", "+00:00"))
-            if abs((ts.date() - start_dt.date()).days) <= 1:
-                target = t
-                break
-        except:
-            pass
+        title = t.get("title", "").lower()
+        tid   = t.get("id", "")
+        if not tid or "tweet" not in title:
+            continue
+        # Match estricto: "march 13" debe aparecer en el título
+        if search_str not in title:
+            continue
 
-    if not target:
+        r2 = requests.get(f"{XTRACKER_API}/trackings/{tid}?includeStats=true",
+                          headers=HDR, timeout=15)
+        r2.raise_for_status()
+        total = r2.json().get("data", {}).get("stats", {}).get("total", 0)
+        log(f"[XTRACKER] matched '{search_str}' → {title[:50]}  total={total}")
+        return int(total)
+
+    log(f"[XTRACKER] sin match para '{search_str}'")
+    return None
+
+
+def _daily_from_snapshots(snapshots: dict, start_date: str) -> dict:
+    """
+    Reconstruye deltas diarios desde snapshots horarios acumulativos.
+    total_dia = max(snapshots del día); delta_dia = total_dia - total_dia_anterior
+    """
+    if not snapshots:
         return {}
 
-    tid = target.get("id", "")
-    if not tid:
+    by_date = {}
+    for ts_str, total in snapshots.items():
+        date = ts_str[:10]
+        by_date[date] = max(by_date.get(date, 0), total)
+
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    dates = sorted(d for d in by_date
+                   if datetime.strptime(d, "%Y-%m-%d") >= start_dt)
+    if not dates:
         return {}
 
-    r2 = requests.get(
-        f"https://xtracker.polymarket.com/api/trackings/{tid}?includeStats=true",
-        headers=HDR, timeout=15)
-    r2.raise_for_status()
-    detail = r2.json().get("data", {})
-
-    result = {}
-    for ds in detail.get("stats", {}).get("dailyStats", []):
-        d = ds.get("date", "")[:10]
-        c = ds.get("count", ds.get("total", 0))
-        if d:
-            result[d] = int(c)
-    return result
-
-
-def _muskmeter_html(start_date: str) -> dict:
-    url = f"https://muskmeter.live/{start_date}"
-    r   = requests.get(url, headers={**HDR, "Accept": "text/html"}, timeout=20)
-    r.raise_for_status()
-
-    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
-                  r.text, re.DOTALL)
-    if not m:
-        return {}
-
-    nd    = json.loads(m.group(1))
-    props = (nd.get("props", {}).get("pageProps", {}) or
-             nd.get("props", {}).get("initialProps", {}))
-    daily = (props.get("dailyData") or props.get("heatmapData") or
-             props.get("tweetData", {}).get("daily") or {})
-
-    if isinstance(daily, dict):
-        return {k: int(v) for k, v in daily.items()
-                if re.match(r'\d{4}-\d{2}-\d{2}', k)}
-
-    totals = re.findall(r'"(\d{4}-\d{2}-\d{2})":\s*(\d+)', r.text)
-    return {d: int(c) for d, c in totals} if totals else {}
+    daily = {}
+    prev = 0
+    for date in dates:
+        day_total    = by_date[date]
+        daily[date]  = max(0, day_total - prev)
+        prev         = day_total
+    return daily
 
 
 # ══════════════════════════════════════════════════════════════════════
-# EVENTOS ACTIVOS  (Gamma API — ambas series Tue/Fri)
+# EVENTOS ACTIVOS  (PolymarketSensor + ClobMarketScanner del bot)
 # ══════════════════════════════════════════════════════════════════════
 
 def fetch_active_events() -> list:
+    """
+    Reutiliza PolymarketSensor y ClobMarketScanner del bot existente.
+    """
     try:
-        r = requests.get(f"{GAMMA_API}/events",
-                         params={"active": "true", "limit": 50},
-                         headers=HDR, timeout=10)
-        raw = r.json() if isinstance(r.json(), list) else r.json().get("events", [])
-    except Exception as e:
-        log(f"[EVENTS] Error Gamma: {e}")
+        from src.polymarket_sensor import PolymarketSensor
+        from src.clob_scanner import ClobMarketScanner
+        from src.utils import titles_match_paranoid
+    except ImportError as e:
+        log(f"[EVENTS] ImportError: {e}. Asegúrate de correr desde ~/Desktop/poly-gemini")
         return []
 
-    now    = datetime.now(tz=timezone.utc)
-    result = []
+    sensor    = PolymarketSensor()
+    scanner   = ClobMarketScanner()
+    now       = datetime.now(tz=timezone.utc)
 
-    for ev in raw:
-        slug = ev.get("slug", "").lower()
-        if "elon" not in slug or "tweet" not in slug:
-            continue
-        try:
-            start_dt = datetime.fromisoformat(
-                ev.get("startDate", "").replace("Z", "+00:00"))
-            end_dt   = datetime.fromisoformat(
-                ev.get("endDate", "").replace("Z", "+00:00"))
-        except:
-            continue
+    m_polys = sensor.get_active_counts()
+    if not m_polys:
+        log("[EVENTS] PolymarketSensor no devolvió eventos")
+        return []
 
-        day_n  = max(1, int((now - start_dt).total_seconds() / 86400) + 1)
-        series = "tue" if start_dt.weekday() == 1 else "fri"
-        h_rem  = max(0, (end_dt - now).total_seconds() / 3600)
+    clob_data = scanner.get_market_prices()
+    result    = []
 
-        prices = {}
-        for m in ev.get("markets", []):
-            rng = m.get("groupItemTitle", "")
-            p   = m.get("lastTradePrice") or m.get("bestAsk")
-            if rng and p is not None:
-                try:
-                    prices[rng] = float(p)
-                except:
-                    pass
+    for mp in m_polys:
+        title   = mp.get("title", "")
+        count   = mp.get("count", 0)
+        h_rem   = mp.get("hours", 0)
+        total_h = mp.get("total_hours", 168)
+
+        elapsed_h = max(0, total_h - h_rem)
+        day_n     = max(1, int(elapsed_h / 24) + 1)
+        start_dt  = now - timedelta(hours=elapsed_h)
+        end_dt    = now + timedelta(hours=h_rem)
+        series    = "tue" if start_dt.weekday() == 1 else "fri"
+        start_ts  = int(start_dt.replace(hour=17, minute=0, second=0,
+                                          microsecond=0).timestamp())
+        end_ts    = int(end_dt.replace(hour=17, minute=0, second=0,
+                                        microsecond=0).timestamp())
+
+        slug = re.sub(r'-+', '-',
+               title.lower().replace(" ", "-").replace("#", "")
+                    .replace(",", "").replace("?", "")).strip('-')
+
+        prices  = {}
+        buckets = []
+        m_clob  = next((c for c in clob_data
+                        if titles_match_paranoid(title, c["title"])), None)
+        if m_clob:
+            buckets = m_clob.get("buckets", [])
+            for b in buckets:
+                rng = b.get("bucket", "")
+                ask = b.get("ask", 0)
+                if rng and ask > 0:
+                    prices[rng] = ask
 
         result.append({
-            "slug":   slug,
-            "label":  ev.get("title", "").replace("Elon Musk # tweets ", ""),
-            "start":  start_dt.strftime("%Y-%m-%d"),
-            "end":    end_dt.strftime("%Y-%m-%d"),
-            "day_n":  day_n,
-            "series": series,
-            "h_rem":  h_rem,
-            "prices": prices,
+            "slug":     slug,
+            "label":    title,
+            "start":    start_dt.strftime("%Y-%m-%d"),
+            "end":      end_dt.strftime("%Y-%m-%d"),
+            "start_ts": start_ts,
+            "end_ts":   end_ts,
+            "event_id": "",
+            "day_n":    day_n,
+            "series":   series,
+            "h_rem":    h_rem,
+            "count":    count,
+            "prices":   prices,
+            "_buckets": buckets,
         })
-        log(f"[EVENTS] {slug}  D{day_n}  {series}  "
-            f"h_rem={h_rem:.0f}h  precios={len(prices)}")
+        log(f"[EVENTS] {title[:45]}  D{day_n}  {series}  "
+            f"h_rem={h_rem:.0f}h  count={count}  precios={len(prices)}")
 
     return result
 
 
 # ══════════════════════════════════════════════════════════════════════
-# MOTOR DE SEÑALES  (pace + DdS + reglas IF/THEN)
+# MOTOR DE SEÑALES
 # ══════════════════════════════════════════════════════════════════════
 
 def proyectar(daily: dict, start: str) -> tuple:
-    """Proyecta total final. Returns (proj, sigma, n_days, pace_mean)."""
     days = sorted(daily.items())
     if not days:
         return HIST_MEAN, HIST_SIGMA, 0, 0
 
-    n         = len(days)
-    vals      = [v for _, v in days]
-    cum       = sum(vals)
-    sv        = sorted(vals)
-    pace_med  = sv[n // 2]
+    n        = len(days)
+    vals     = [v for _, v in days]
+    cum      = sum(vals)
+    sv       = sorted(vals)
+    pace_med = sv[n // 2]
     pace_mean = cum / n
     has_burst = max(vals) > 2 * pace_med and pace_med > 8
     pace_base = pace_med if has_burst else pace_mean
@@ -384,14 +448,12 @@ def proyectar(daily: dict, start: str) -> tuple:
 
 
 def rp(lo, hi, mu, sigma):
-    """P(total en [lo, hi]) bajo normal."""
     def cdf(x):
         return 0.5 * (1 + math.erf((x - mu) / (sigma * math.sqrt(2))))
     return max(0, cdf(hi + 0.5) - cdf(lo - 0.5))
 
 
 def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
-    """Genera señal D3-D5. None si EV < 10% o datos insuficientes."""
     day_n  = event["day_n"]
     prices = event["prices"]
 
@@ -414,19 +476,14 @@ def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
         for j in range(i + 1, min(i + 6, len(rangos))):
             sub   = rangos[i:j + 1]
             cost  = sum(prices.get(r, 0) for r in sub)
-            p_win = sum(rp(int(r.split("-")[0]),
-                           int(r.split("-")[0]) + 19,
+            p_win = sum(rp(int(r.split("-")[0]), int(r.split("-")[0]) + 19,
                            proj, sigma) for r in sub)
             if 0.05 < cost < 0.80 and len(sub) >= 2 and p_win > 0.05:
                 ev = p_win / cost - 1
                 if ev > 0.10:
-                    best.append({
-                        "ranges": sub,
-                        "cost":   round(cost, 3),
-                        "p_win":  round(p_win, 3),
-                        "ev":     round(ev, 3),
-                        "roi":    round(1 / cost - 1, 2),
-                    })
+                    best.append({"ranges": sub, "cost": round(cost, 3),
+                                 "p_win": round(p_win, 3), "ev": round(ev, 3),
+                                 "roi": round(1 / cost - 1, 2)})
 
     if not best:
         return None
@@ -434,48 +491,32 @@ def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
     best.sort(key=lambda x: -x["ev"])
     top = best[0]
 
-    ci_lo      = proj - 1.4 * sigma
-    ci_hi      = proj + 1.4 * sigma
+    ci_lo = proj - 1.4 * sigma
+    ci_hi = proj + 1.4 * sigma
     no_signals = []
     for rng, p_yes in prices.items():
         if "-" not in rng:
             continue
         lo, hi = map(int, rng.split("-"))
         if (hi < ci_lo - 15 or lo > ci_hi + 15) and p_yes > 0.08:
-            no_signals.append({
-                "range":    rng,
-                "price_no": round(1 - p_yes, 3),
-                "roi_no":   round(1 / (1 - p_yes) - 1, 3),
-            })
+            no_signals.append({"range": rng, "price_no": round(1 - p_yes, 3),
+                               "roi_no": round(1 / (1 - p_yes) - 1, 3)})
 
     return {
-        "event":      event["label"],
-        "slug":       event["slug"],
-        "day_n":      day_n,
-        "series":     event["series"],
-        "ts":         datetime.now(tz=timezone.utc).isoformat(),
-        "proj":       proj,
-        "sigma":      sigma,
-        "pace":       pace,
-        "confidence": confidence,
-        "spread":     top,
-        "no_signals": no_signals[:3],
-        "prices":     prices,
+        "event": event["label"], "slug": event["slug"],
+        "day_n": day_n, "series": event["series"],
+        "ts":    datetime.now(tz=timezone.utc).isoformat(),
+        "proj":  proj, "sigma": sigma, "pace": pace,
+        "confidence": confidence, "spread": top,
+        "no_signals": no_signals[:3], "prices": prices,
     }
 
 
 # ══════════════════════════════════════════════════════════════════════
-# PAPER BOOK  (portfolio con persistencia dual JSON + PostgreSQL)
+# PAPER BOOK
 # ══════════════════════════════════════════════════════════════════════
 
 class PaperBook:
-    """
-    Portfolio paper trading.
-    JSON local siempre (fallback offline).
-    PostgreSQL cuando disponible, con mode='SIGNAL_PAPER'
-    — completamente separado de los trades REAL del bot.
-    """
-
     def __init__(self):
         self.data = self._load()
 
@@ -486,66 +527,44 @@ class PaperBook:
                     return json.load(f)
             except:
                 pass
-        return {
-            "capital":   CAPITAL_INIT,
-            "positions": {},
-            "history":   [],
-            "stats":     {"signals": 0, "trades": 0,
-                          "wins": 0, "losses": 0, "pnl": 0.0},
-        }
+        return {"capital": CAPITAL_INIT, "positions": {}, "history": [],
+                "stats": {"signals": 0, "trades": 0,
+                          "wins": 0, "losses": 0, "pnl": 0.0}}
 
     def _save(self):
         with open(PAPER_FILE, "w") as f:
             json.dump(self.data, f, indent=2)
 
-    # ── DB helpers ───────────────────────────────────────────────────
-
-    def _db_log_trade(self, action, market, bucket, price, shares,
-                      reason, pnl, cash_after, pos_id,
-                      entry_reason=None, exit_reason=None, outcome=None):
+    def _db_log(self, **kw):
         if not _DB_OK:
             return
         try:
-            _db.log_trade(
-                action=action, market=market, bucket=bucket,
-                price=price, shares=shares, reason=reason,
-                pnl=pnl, cash_after=cash_after,
-                mode="SIGNAL_PAPER", strategy="SPREAD_YES",
-                pos_id=pos_id,
-                entry_signal_reason=entry_reason,
-                exit_signal_reason=exit_reason,
-                trade_outcome_label=outcome,
-            )
+            _db.log_trade(mode="SIGNAL_PAPER", strategy="SPREAD_YES", **kw)
         except Exception as e:
-            log(f"[DB] log_trade error: {e}")
+            log(f"[DB] log error: {e}")
 
-    def _db_upsert_pos(self, pos_id, market, bucket, shares, entry_price, amount):
+    def _db_upsert(self, pos_id, market, bucket, shares, entry, amount):
         if not _DB_OK:
             return
         try:
             _db.upsert_position(pos_id, {
-                "market": market, "bucket": bucket,
-                "shares": shares, "entry_price": entry_price,
-                "invested": amount, "strategy_tag": "SPREAD_YES",
-                "mode": "SIGNAL_PAPER",
-            })
+                "market": market, "bucket": bucket, "shares": shares,
+                "entry_price": entry, "invested": amount,
+                "strategy_tag": "SPREAD_YES", "mode": "SIGNAL_PAPER"})
             _db.set_state("signal_paper_cash", self.data["capital"])
         except Exception as e:
-            log(f"[DB] upsert_pos error: {e}")
+            log(f"[DB] upsert error: {e}")
 
-    def _db_close_pos(self, pos_id, pnl):
+    def _db_close(self, pos_id, pnl):
         if not _DB_OK:
             return
         try:
             _db.close_position(pos_id, pnl)
             _db.set_state("signal_paper_cash", self.data["capital"])
         except Exception as e:
-            log(f"[DB] close_pos error: {e}")
-
-    # ── Trading ──────────────────────────────────────────────────────
+            log(f"[DB] close error: {e}")
 
     def buy(self, signal: dict, tg: Telegram) -> list:
-        """Compra todos los rangos del spread. Returns rangos comprados."""
         spread = signal["spread"]
         prices = signal["prices"]
         event  = signal["event"]
@@ -555,11 +574,9 @@ class PaperBook:
             pos_id = f"{signal['slug']}|{rng}"
             if pos_id in self.data["positions"]:
                 continue
-
-            price  = prices.get(rng, 0)
+            price = prices.get(rng, 0)
             if price <= 0 or price > 0.80:
                 continue
-
             amount = max(1.0, self.data["capital"] * RISK_PER_RANGE)
             if self.data["capital"] < amount:
                 log(f"[PAPER] Sin capital para {rng}")
@@ -568,155 +585,110 @@ class PaperBook:
             shares = amount / price
             self.data["capital"] -= amount
             self.data["positions"][pos_id] = {
-                "entry":  price,
-                "shares": shares,
-                "cost":   amount,
-                "event":  event,
-                "slug":   signal["slug"],
-                "rng":    rng,
-                "ts":     datetime.now().isoformat(),
-                "day_n":  signal["day_n"],
-            }
+                "entry": price, "shares": shares, "cost": amount,
+                "event": event, "slug": signal["slug"], "rng": rng,
+                "ts": datetime.now().isoformat(), "day_n": signal["day_n"]}
             self.data["stats"]["trades"] += 1
             bought.append(rng)
 
-            log(f"[PAPER] BUY  {rng} @ {price:.3f}  ${amount:.2f}  "
-                f"cap=${self.data['capital']:.2f}")
+            log(f"[PAPER] BUY  {rng} @ {price:.3f}  ${amount:.2f}  cap=${self.data['capital']:.2f}")
             tg.paper_buy(event, rng, price, amount, self.data["capital"])
-
-            self._db_log_trade(
-                action="BUY", market=event, bucket=rng,
-                price=price, shares=shares,
-                reason=f"SIGNAL_D{signal['day_n']}",
-                pnl=0, cash_after=self.data["capital"],
-                pos_id=pos_id,
-                entry_reason=(f"spread ev={spread['ev']:+.0%} "
-                               f"conf={signal['confidence']} "
-                               f"proj={signal['proj']}"),
-            )
-            self._db_upsert_pos(pos_id, event, rng, shares, price, amount)
+            self._db_log(action="BUY", market=event, bucket=rng, price=price,
+                         shares=shares, reason=f"SIGNAL_D{signal['day_n']}",
+                         pnl=0, cash_after=self.data["capital"], pos_id=pos_id,
+                         entry_signal_reason=f"ev={spread['ev']:+.0%} conf={signal['confidence']} proj={signal['proj']}")
+            self._db_upsert(pos_id, event, rng, shares, price, amount)
 
         self._save()
         return bought
 
     def check_exits(self, active_events: list, tg: Telegram):
-        """Cierra posiciones según criterios de salida."""
         prices_by_slug = {ev["slug"]: ev["prices"] for ev in active_events}
         h_rem_by_slug  = {ev["slug"]: ev["h_rem"]  for ev in active_events}
-        to_close       = []
+        to_close = []
 
         for pos_id, pos in self.data["positions"].items():
-            slug          = pos["slug"]
-            rng           = pos["rng"]
-            current_price = prices_by_slug.get(slug, {}).get(rng, pos["entry"])
-            profit_pct    = (current_price - pos["entry"]) / pos["entry"]
-            h_rem         = h_rem_by_slug.get(slug, 100)
+            slug  = pos["slug"]
+            rng   = pos["rng"]
+            cp    = prices_by_slug.get(slug, {}).get(rng, pos["entry"])
+            pct   = (cp - pos["entry"]) / pos["entry"]
+            h_rem = h_rem_by_slug.get(slug, 100)
 
             reason = None
-            exit_p = current_price
+            exit_p = cp
 
-            if h_rem <= 48 and current_price >= 0.97:
-                reason = f"Victory Lap ({current_price:.2f})"
-            elif pos["entry"] < 0.15 and profit_pct < -0.80:
-                reason = f"Stop Loss ({profit_pct*100:.0f}%)"
-            elif pos["entry"] >= 0.15 and profit_pct < -0.40:
-                reason = f"Stop Loss ({profit_pct*100:.0f}%)"
+            if h_rem <= 48 and cp >= 0.97:
+                reason = f"Victory Lap ({cp:.2f})"
+            elif pos["entry"] < 0.15 and pct < -0.80:
+                reason = f"Stop Loss ({pct*100:.0f}%)"
+            elif pos["entry"] >= 0.15 and pct < -0.40:
+                reason = f"Stop Loss ({pct*100:.0f}%)"
             elif h_rem < -2:
                 reason = "Evento expirado"
-                exit_p = max(current_price, 0.01)
-            elif h_rem <= 24 and current_price < 0.05:
-                reason = f"Prune final ({current_price*100:.1f}¢)"
+                exit_p = max(cp, 0.01)
+            elif h_rem <= 24 and cp < 0.05:
+                reason = f"Prune final ({cp*100:.1f}¢)"
 
             if reason:
                 to_close.append((pos_id, pos, exit_p, reason))
 
         for pos_id, pos, exit_p, reason in to_close:
             pnl     = (exit_p - pos["entry"]) * pos["shares"]
-            revenue = exit_p * pos["shares"]
-            self.data["capital"] += revenue
+            self.data["capital"] += exit_p * pos["shares"]
             outcome = "win" if pnl > 0 else "loss"
-
             if outcome == "win":
                 self.data["stats"]["wins"] += 1
             else:
                 self.data["stats"]["losses"] += 1
-            self.data["stats"]["pnl"] = round(
-                self.data["stats"].get("pnl", 0) + pnl, 4)
-
+            self.data["stats"]["pnl"] = round(self.data["stats"].get("pnl", 0) + pnl, 4)
             self.data["history"].append({
                 "event": pos["event"], "rng": pos["rng"],
                 "entry": pos["entry"], "exit": exit_p,
                 "pnl": round(pnl, 4), "reason": reason,
-                "ts": datetime.now().isoformat(),
-            })
+                "ts": datetime.now().isoformat()})
             del self.data["positions"][pos_id]
 
             log(f"[PAPER] CLOSE {pos['rng']}  pnl={pnl:+.2f}  {reason}")
-            tg.paper_close(pos["event"], pos["rng"],
-                           pos["entry"], exit_p, pnl, reason)
-
-            self._db_log_trade(
-                action="SELL", market=pos["event"], bucket=pos["rng"],
-                price=exit_p, shares=pos["shares"], reason=reason,
-                pnl=pnl, cash_after=self.data["capital"],
-                pos_id=pos_id, exit_reason=reason, outcome=outcome,
-            )
-            self._db_close_pos(pos_id, pnl)
+            tg.paper_close(pos["event"], pos["rng"], pos["entry"], exit_p, pnl, reason)
+            self._db_log(action="SELL", market=pos["event"], bucket=pos["rng"],
+                         price=exit_p, shares=pos["shares"], reason=reason,
+                         pnl=pnl, cash_after=self.data["capital"], pos_id=pos_id,
+                         exit_signal_reason=reason, trade_outcome_label=outcome)
+            self._db_close(pos_id, pnl)
 
         if to_close:
             self._save()
 
     def enrich_positions(self, active_events: list) -> list:
-        """Añade current_price a cada posición abierta."""
         prices_by_slug = {ev["slug"]: ev["prices"] for ev in active_events}
-        enriched = []
-        for pos_id, pos in self.data["positions"].items():
-            cp = prices_by_slug.get(pos["slug"], {}).get(pos["rng"], pos["entry"])
-            enriched.append({**pos, "current_price": cp})
-        return enriched
+        return [{**pos, "current_price": prices_by_slug.get(pos["slug"], {}).get(pos["rng"], pos["entry"])}
+                for pos in self.data["positions"].values()]
 
 
 # ══════════════════════════════════════════════════════════════════════
-# DB QUERY  — snapshot del portfolio SIGNAL_PAPER
+# DB SNAPSHOT
 # ══════════════════════════════════════════════════════════════════════
 
 def db_snapshot() -> dict | None:
-    """Lee el portfolio SIGNAL_PAPER directamente de PostgreSQL."""
     if not _DB_OK or _pge is None:
         return None
     try:
         with _db.get_conn() as conn:
             cur = conn.cursor(cursor_factory=_pge.RealDictCursor)
-
-            cur.execute(
-                "SELECT value FROM bot_state "
-                "WHERE key = 'signal_paper_cash'")
+            cur.execute("SELECT value FROM bot_state WHERE key='signal_paper_cash'")
             row     = cur.fetchone()
             capital = float(row["value"]) if row else CAPITAL_INIT
-
-            cur.execute(
-                "SELECT pos_id, bucket, market, shares, "
-                "       entry_price, current_price, invested "
-                "FROM positions WHERE mode = 'SIGNAL_PAPER' "
-                "ORDER BY opened_at DESC")
+            cur.execute("SELECT pos_id, bucket, entry_price, current_price "
+                        "FROM positions WHERE mode='SIGNAL_PAPER' ORDER BY opened_at DESC")
             positions = [dict(r) for r in cur.fetchall()]
-
-            cur.execute(
-                "SELECT action, bucket, price, pnl, ts, trade_outcome_label "
-                "FROM trades WHERE mode = 'SIGNAL_PAPER' "
-                "ORDER BY ts DESC LIMIT 50")
+            cur.execute("SELECT action, bucket, price, pnl FROM trades "
+                        "WHERE mode='SIGNAL_PAPER' ORDER BY ts DESC LIMIT 50")
             trades = [dict(r) for r in cur.fetchall()]
-
-        wins  = sum(1 for t in trades
-                    if t["action"] == "SELL" and float(t.get("pnl") or 0) > 0)
-        loss  = sum(1 for t in trades
-                    if t["action"] == "SELL" and float(t.get("pnl") or 0) <= 0)
-        total_pnl = sum(float(t.get("pnl") or 0)
-                        for t in trades if t["action"] == "SELL")
-        return {
-            "capital": capital, "positions": positions,
-            "wins": wins, "losses": loss, "total_pnl": total_pnl,
-        }
+        wins  = sum(1 for t in trades if t["action"]=="SELL" and float(t.get("pnl") or 0) > 0)
+        losses= sum(1 for t in trades if t["action"]=="SELL" and float(t.get("pnl") or 0) <= 0)
+        return {"capital": capital, "positions": positions, "wins": wins,
+                "losses": losses, "total_pnl": sum(float(t.get("pnl") or 0)
+                for t in trades if t["action"]=="SELL")}
     except Exception as e:
         log(f"[DB] snapshot error: {e}")
         return None
@@ -733,15 +705,16 @@ def load_state() -> dict:
                 return json.load(f)
         except:
             pass
-    return {
-        "muskmeter":    {},
-        "signals_sent": {},
-        "prev_totals":  {},
-        "last_weekly":  None,
-    }
+    return {"muskmeter": {}, "xtracker_snapshots": {},
+            "signals_sent": {}, "prev_totals": {}, "last_weekly": None}
 
 
 def save_state(state: dict):
+    cutoff = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+    for slug in list(state.get("xtracker_snapshots", {}).keys()):
+        state["xtracker_snapshots"][slug] = {
+            k: v for k, v in state["xtracker_snapshots"][slug].items()
+            if k[:10] >= cutoff}
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
@@ -775,42 +748,37 @@ def main():
         try:
             log(f"\n{'─'*50} {datetime.now().strftime('%H:%M')}")
 
-            # 1. Detectar eventos activos (Tue + Fri en paralelo)
             events = fetch_active_events()
             if not events:
                 log("[MAIN] Sin eventos activos — reintento en 5 min")
                 time.sleep(300)
                 continue
 
-            # 2. Revisar exits del portfolio paper
             paper.check_exits(events, tg)
 
-            # 3. Procesar cada evento
             for ev in events:
                 slug  = ev["slug"]
                 day_n = ev["day_n"]
 
-                # Scrapear tweets automáticamente
-                fresh = scrape_tweets(ev["start"])
+                fresh = scrape_tweets(ev, state)
                 if fresh:
                     state["muskmeter"][slug] = fresh
                     save_state(state)
-                    cum = sum(fresh.values())
-                    log(f"[SCRAPE] {slug}: {len(fresh)} días, {cum} tweets total")
+                    log(f"[SCRAPE] {slug}: {len(fresh)} días, {sum(fresh.values())} tweets")
                 else:
                     fresh = state["muskmeter"].get(slug, {})
                     if not fresh:
-                        log(f"[SCRAPE] {slug}: sin datos, saltando")
+                        log(f"[SCRAPE] {slug}: sin datos")
+                        if day_n >= 3:
+                            tg.scrape_warning(ev["label"], day_n)
                         continue
                     log(f"[SCRAPE] {slug}: cache ({len(fresh)} días)")
 
                 prev_total = state["prev_totals"].get(ev["series"], HIST_MEAN)
+                last_day   = state["signals_sent"].get(slug, 0)
 
-                # 4. Generar señal si D3-D5 y no enviada aún en este día
-                last_day_sent = state["signals_sent"].get(slug, 0)
-                if day_n >= 3 and day_n != last_day_sent:
+                if day_n >= 3 and day_n != last_day:
                     signal = generar_senal(ev, fresh, prev_total)
-
                     if signal:
                         paper.data["stats"]["signals"] += 1
                         paper._save()
@@ -821,32 +789,24 @@ def main():
                         log(f"[SIGNAL] ✅ D{day_n}  ranges={top['ranges']}  "
                             f"ev={top['ev']:+.0%}  conf={signal['confidence']}")
 
-                        tg.signal_entry(
-                            label=ev["label"], day_n=day_n,
-                            ranges=top["ranges"], prices=ev["prices"],
-                            proj=signal["proj"], ev=top["ev"],
-                            confidence=signal["confidence"],
-                        )
+                        tg.signal_entry(label=ev["label"], day_n=day_n,
+                                        ranges=top["ranges"], prices=ev["prices"],
+                                        proj=signal["proj"], ev=top["ev"],
+                                        confidence=signal["confidence"])
 
                         bought = paper.buy(signal, tg)
                         if bought:
                             log(f"[PAPER] Comprados: {bought}")
                     else:
-                        log(f"[MAIN] {slug} D{day_n}: sin señal (EV insuficiente)")
+                        log(f"[MAIN] {slug} D{day_n}: sin señal (EV insuficiente o <3 días datos)")
 
-            # 5. Resumen semanal — lunes 08:00 UTC
             now = datetime.now()
             if (now.weekday() == 0 and now.hour == 8
                     and (now - last_weekly).total_seconds() > 86400):
-                enriched = paper.enrich_positions(events)
-                tg.portfolio_summary(
-                    paper.data["capital"], enriched, paper.data["stats"])
+                tg.portfolio_summary(paper.data["capital"],
+                                     paper.enrich_positions(events),
+                                     paper.data["stats"])
                 tg.weekly_summary(paper.data["capital"], paper.data["stats"])
-                snap = db_snapshot()
-                if snap:
-                    log(f"[DB] Snapshot: ${snap['capital']:.2f}  "
-                        f"{snap['wins']}W/{snap['losses']}L  "
-                        f"pnl=${snap['total_pnl']:+.2f}")
                 state["last_weekly"] = now.isoformat()
                 save_state(state)
                 last_weekly = now
@@ -857,7 +817,7 @@ def main():
         except KeyboardInterrupt:
             log("[MAIN] Bot detenido")
             paper._save()
-            enriched = paper.enrich_positions(events if 'events' in dir() else [])
+            save_state(state)
             tg.bot_stop(paper.data["capital"], paper.data["stats"])
             break
 
