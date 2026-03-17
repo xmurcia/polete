@@ -206,6 +206,7 @@ def burst_monitor_loop(tg: Telegram, get_events_fn):
                          else data.get("trackings", []))
 
             max_pace    = 0.0
+            max_delta   = 0
             burst_label = ""
 
             for t in trackings:
@@ -226,10 +227,11 @@ def burst_monitor_loop(tg: Telegram, get_events_fn):
                     prev_total, prev_ts = _burst_prev_totals[tid]
                     delta    = max(0, total - prev_total)
                     interval = (now - prev_ts).total_seconds() / 3600
-                    if 0 < interval < 1:   # solo polls recientes
+                    if 0 < interval < 1 and delta > 0:   # solo polls recientes con actividad
                         pace = delta / interval
                         if pace > max_pace:
                             max_pace    = pace
+                            max_delta   = delta
                             burst_label = title
 
                 _burst_prev_totals[tid] = (total, now)
@@ -247,7 +249,7 @@ def burst_monitor_loop(tg: Telegram, get_events_fn):
                     _last_burst_alert = now
                     log(f"[BURST] 🔥 pace={max_pace:.0f}/h  {burst_label[:50]}")
                     tg.burst_alert(label=burst_label, pace=max_pace,
-                                   n_tweets=0, examples=[])
+                                   n_tweets=max_delta, examples=[])
 
         except Exception as e:
             log(f"[BURST] Error: {e}")
@@ -499,7 +501,9 @@ def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
     pace3 = sum(vals[:3])/3 if len(vals) >= 3 else pace
     confidence = "ALTA" if (pace3 > 50 or pace3 < 25 or max(vals[:3]) > 60) else "MEDIA"
 
-    rangos = sorted([r for r in prices if "-" in r],
+    cum_total = sum(daily.values())
+    rangos = sorted([r for r in prices if "-" in r
+                     and int(r.split("-")[1]) > cum_total],
                     key=lambda x: int(x.split("-")[0]))
     best = []
     for i in range(len(rangos)):
