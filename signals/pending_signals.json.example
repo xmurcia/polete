@@ -1,0 +1,2 @@
+# pending_signals.json — señales pendientes generadas por orchestrator.py
+# Se sobreescribe en cada ciclo. No commitear.
