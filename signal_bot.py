@@ -152,9 +152,10 @@ class Telegram:
                   f"  ⏰ {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
     def burst_alert(self, label, pace, n_tweets, examples):
+        mins = BURST_POLL_SEC // 60
         self.send(f"🔥 <b>BURST DETECTADO — {label}</b>\n"
                   f"  Pace:    <b>{pace:.0f} tweets/hora</b>\n"
-                  f"  Últimos: <b>{n_tweets} tweets</b> en 10 min\n"
+                  f"  Últimos: <b>{n_tweets} tweets</b> en {mins} min\n"
                   f"  Ejemplo: {examples[0][:80] if examples else '—'}\n"
                   f"  ⚡ El mercado tardará ~15 min en ajustarse")
 
@@ -206,6 +207,7 @@ def burst_monitor_loop(tg: Telegram, get_events_fn):
                          else data.get("trackings", []))
 
             max_pace    = 0.0
+            max_delta   = 0
             burst_label = ""
 
             for t in trackings:
@@ -230,6 +232,7 @@ def burst_monitor_loop(tg: Telegram, get_events_fn):
                         pace = delta / interval
                         if pace > max_pace:
                             max_pace    = pace
+                            max_delta   = delta
                             burst_label = title
 
                 _burst_prev_totals[tid] = (total, now)
@@ -240,14 +243,14 @@ def burst_monitor_loop(tg: Telegram, get_events_fn):
                 log(f"[BURST] heartbeat — max_pace={max_pace:.1f}/h  "
                     f"trackings={len(trackings)}")
 
-            if max_pace >= BURST_THRESHOLD:
+            if max_pace >= BURST_THRESHOLD and max_delta > 0:
                 cooldown_ok = (_last_burst_alert is None or
                                (now - _last_burst_alert).total_seconds() > 1200)
                 if cooldown_ok:
                     _last_burst_alert = now
-                    log(f"[BURST] 🔥 pace={max_pace:.0f}/h  {burst_label[:50]}")
+                    log(f"[BURST] 🔥 pace={max_pace:.0f}/h  delta={max_delta}  {burst_label[:50]}")
                     tg.burst_alert(label=burst_label, pace=max_pace,
-                                   n_tweets=0, examples=[])
+                                   n_tweets=max_delta, examples=[])
 
         except Exception as e:
             log(f"[BURST] Error: {e}")
@@ -499,7 +502,9 @@ def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
     pace3 = sum(vals[:3])/3 if len(vals) >= 3 else pace
     confidence = "ALTA" if (pace3 > 50 or pace3 < 25 or max(vals[:3]) > 60) else "MEDIA"
 
-    rangos = sorted([r for r in prices if "-" in r],
+    cum_total = sum(daily.values())
+    rangos = sorted([r for r in prices if "-" in r
+                     and int(r.split("-")[1]) > cum_total],
                     key=lambda x: int(x.split("-")[0]))
     best = []
     for i in range(len(rangos)):
