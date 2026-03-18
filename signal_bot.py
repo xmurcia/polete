@@ -47,7 +47,9 @@ BURST_POLL_SEC        = 120     # burst monitor cada 2 min
 BURST_INTER_TWEET_MIN = 5.0    # minutos entre tweets para considerar burst
 BURST_SORPRESA_MULT   = 2.5    # multiplicador sobre AVG histórico de esa hora
 BURST_HORAS_MIN       = 2      # horas consecutivas rápidas para considerar sostenido
-BURST_SCORE_MIN       = 3      # score mínimo para disparar alerta
+BURST_SCORE_MIN       = 3      # score mínimo para disparar alerta (sobre 6)
+BURST_TIMING_MIN_PCT  = 0.35   # no alertar entrada si evento <35% completado
+BURST_LOW_PRICE_THRESHOLD = 0.10  # por debajo de este precio, señal más fiable
 XTRACKER_API    = "https://xtracker.polymarket.com/api"
 HDR             = {"User-Agent": "Mozilla/5.0"}
 MONTH_NAMES     = ["january","february","march","april","may","june",
@@ -162,22 +164,37 @@ class Telegram:
                   f"  ⏰ {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
     def burst_alert(self, label, tweets_hora, inter_tweet_min, avg_hora,
-                    horas_consecutivas, proj_normal, rango_normal,
-                    proj_burst, rango_burst, burst_score):
+                    horas_consecutivas, pct_completado, proj_normal, rango_normal,
+                    proj_burst, rango_burst, spread_status, precio_winner,
+                    burst_score, timing_guard_active):
+        sorpresa_txt = (f"<b>{tweets_hora/avg_hora:.1f}x</b> sobre AVG histórico ({avg_hora:.1f}/h)"
+                        if avg_hora > 0 else "N/A (AVG=0)")
+        precio_note = " ← no priceado" if precio_winner < BURST_LOW_PRICE_THRESHOLD else ""
+        spread_note = "⚠️ SALIDA RECOMENDADA" if spread_status == "FUERA" else "✓"
         lines = [
             f"🔥 <b>BURST DETECTADO — {label}</b>",
-            f"  Tweets esta hora: <b>{tweets_hora}</b>",
-            f"  Inter-tweet: <b>{inter_tweet_min:.1f} min</b>",
-            f"  Sorpresa: <b>{tweets_hora/avg_hora:.1f}x</b> sobre AVG ({avg_hora})" if avg_hora > 0 else f"  Sorpresa: N/A (AVG=0)",
-            f"  Horas consecutivas rápidas: <b>{horas_consecutivas}</b>",
-            f"  Proyección normal: <b>{proj_normal:.0f}</b> tweets → rango {rango_normal}",
-            f"  Proyección burst:  <b>{proj_burst:.0f}</b> tweets → rango {rango_burst}",
-            f"  Burst score: <b>{burst_score}/5</b>",
-            f"  ⚡ El mercado tardará ~15 min en ajustarse",
+            f"  Tweets esta hora:   <b>{tweets_hora}</b>",
+            f"  Inter-tweet:        <b>{inter_tweet_min:.1f} min</b> entre tweets",
+            f"  Sorpresa:           {sorpresa_txt}",
+            f"  Horas consecutivas: <b>{horas_consecutivas}</b>",
+            f"  Progreso evento:    <b>{pct_completado:.0%}</b> completado",
+            f"  Proyección normal:  <b>{proj_normal:.0f}</b> tweets → {rango_normal}",
+            f"  Proyección burst:   <b>{proj_burst:.0f}</b> tweets → {rango_burst}",
+            f"  Spread comprado:    <b>{spread_status}</b> {spread_note}",
+            f"  Precio winner:      <b>{precio_winner:.3f}</b>{precio_note}",
+            f"  Burst score:        <b>{burst_score}/6</b>",
         ]
-        if rango_burst == rango_normal:
-            lines.append(f"  ⚠️ No desplaza rango — impacto en precio limitado")
+        if timing_guard_active:
+            lines.append(f"  ⏸ Evento <{BURST_TIMING_MIN_PCT:.0%} completado — solo alerta EXIT activa")
+        else:
+            lines.append(f"  ⚡ El mercado tardará ~15 min en ajustarse")
         self.send("\n".join(lines))
+
+    def burst_exit_alert(self, label, spread_status, rango_burst, pct_completado):
+        self.send(f"⚠️ <b>BURST EXIT — {label}</b>\n"
+                  f"  BURST desplaza proyección <b>FUERA</b> del spread → considerar salida\n"
+                  f"  Rango burst: {rango_burst}\n"
+                  f"  Progreso: {pct_completado:.0%}")
 
     def scrape_warning(self, label, day_n):
         self.send(f"⚠️ <b>Sin datos tweets D{day_n}</b>\n  {label}", silent=True)
@@ -226,8 +243,8 @@ def _rango_de(proj, buckets):
     return "???"
 
 
-def burst_monitor_loop(tg: Telegram, get_events_fn):
-    log("[BURST] Monitor iniciado — burst score multidimensional")
+def burst_monitor_loop(tg: Telegram, get_events_fn, paper_book=None):
+    log("[BURST] Monitor iniciado — burst score multidimensional (6 dims)")
     cycle = 0
 
     while True:
@@ -278,11 +295,11 @@ def burst_monitor_loop(tg: Telegram, get_events_fn):
                 if tweets_hora < 1:
                     continue
 
-                # ── Burst Score ──────────────────────────────────
+                # ── Burst Score (6 dimensiones) ───────────────────
                 burst_score = 0
                 inter_tweet_min = 60.0 / tweets_hora if tweets_hora > 0 else 999
 
-                # Dim 1 — Frecuencia
+                # Dim 1 — Frecuencia (inter-tweet)
                 dim1 = False
                 if tweets_hora >= 3 and inter_tweet_min < BURST_INTER_TWEET_MIN:
                     burst_score += 1
@@ -308,26 +325,26 @@ def burst_monitor_loop(tg: Telegram, get_events_fn):
                 if horas_consecutivas >= BURST_HORAS_MIN:
                     burst_score += 1
 
-                # Dim 4 — Desplazamiento de proyección (vale doble)
+                # ── Proyecciones ──────────────────────────────────
                 ev_match = next((e for e in events
                                  if title.lower() in e.get("label","").lower()
                                  or e.get("label","").lower() in title.lower()), None)
                 cum_total = total
                 h_rem = ev_match["h_rem"] if ev_match else 0
                 buckets = ev_match.get("_buckets", []) if ev_match else []
+                prices = ev_match.get("prices", {}) if ev_match else {}
 
                 # pace normal = mediana de días anteriores (del state muskmeter)
                 pace_normal = HIST_MEAN / 7  # fallback
+                muskmeter_daily = {}
                 if ev_match:
                     try:
-                        from pathlib import Path as _P
-                        sf = _P(__file__).parent / "logs" / "signals" / "signal_bot_state.json"
+                        sf = ROOT / "logs" / "signals" / "signal_bot_state.json"
                         if sf.exists():
-                            import json as _j
-                            st = _j.loads(sf.read_text())
-                            daily = st.get("muskmeter", {}).get(ev_match["slug"], {})
-                            if daily:
-                                vals = sorted(daily.values())
+                            st = json.loads(sf.read_text())
+                            muskmeter_daily = st.get("muskmeter", {}).get(ev_match["slug"], {})
+                            if muskmeter_daily:
+                                vals = sorted(muskmeter_daily.values())
                                 pace_normal = vals[len(vals) // 2]
                     except Exception:
                         pass
@@ -339,35 +356,109 @@ def burst_monitor_loop(tg: Telegram, get_events_fn):
                 rango_normal = _rango_de(proj_normal, buckets)
                 rango_burst  = _rango_de(proj_burst, buckets)
 
-                if rango_burst != rango_normal:
-                    burst_score += 2
+                # ── Refinamiento 1: Timing guard ──────────────────
+                pct_completado = cum_total / proj_normal if proj_normal > 0 else 0
+                timing_guard_active = pct_completado < BURST_TIMING_MIN_PCT
 
-                # ── Alerta ───────────────────────────────────────
+                if timing_guard_active:
+                    log(f"[BURST] timing guard activo — {pct_completado:.0%} completado, "
+                        f"mínimo requerido {BURST_TIMING_MIN_PCT:.0%}")
+
+                # ── Dim 4 — Spread check (dentro/fuera del spread comprado, +2/+1/+0)
+                spread_status = "N/A"
+                has_position = False
+                if paper_book and ev_match:
+                    slug = ev_match.get("slug", "")
+                    owned_ranges = [
+                        pos["rng"] for pos_id, pos in paper_book.data.get("positions", {}).items()
+                        if pos.get("slug") == slug
+                    ]
+                    if owned_ranges:
+                        has_position = True
+                        if rango_burst in owned_ranges:
+                            burst_score += 2
+                            spread_status = "DENTRO"
+                        else:
+                            spread_status = "FUERA"
+                            # +0, no suma — pero dispara alerta EXIT
+                    else:
+                        # Sin posición: fallback a lógica anterior (acerca al winner)
+                        if rango_burst != rango_normal:
+                            burst_score += 1
+                        spread_status = "SIN_POS"
+                else:
+                    # Sin paper_book o sin ev_match: fallback
+                    if rango_burst != rango_normal:
+                        burst_score += 1
+                    spread_status = "SIN_POS"
+
+                # ── Dim 5 — Precio winner bajo (<threshold) ──────
+                precio_winner = 0.0
+                if prices:
+                    precio_winner = prices.get(rango_burst, 0.0)
+                    if precio_winner <= 0:
+                        # buscar rango más cercano a proj_burst
+                        best_dist = float("inf")
+                        for rng, p in prices.items():
+                            if "-" not in rng:
+                                continue
+                            mid = (int(rng.split("-")[0]) + int(rng.split("-")[1])) / 2
+                            d = abs(mid - proj_burst)
+                            if d < best_dist:
+                                best_dist = d
+                                precio_winner = p
+
+                if precio_winner > 0 and precio_winner < BURST_LOW_PRICE_THRESHOLD:
+                    burst_score += 1
+
+                # ── Alerta ────────────────────────────────────────
                 cycle += 1
                 if cycle % 10 == 0:
-                    log(f"[BURST] heartbeat — {title[:40]}  score={burst_score}  "
-                        f"tw/h={tweets_hora}  trackings={len(trackings)}")
+                    log(f"[BURST] heartbeat — {title[:40]}  score={burst_score}/6  "
+                        f"tw/h={tweets_hora}  pct={pct_completado:.0%}  "
+                        f"spread={spread_status}  trackings={len(trackings)}")
 
+                # Alerta EXIT independiente: spread FUERA (incluso con timing guard)
+                if spread_status == "FUERA" and has_position:
+                    last_alert = _last_burst_alert.get(f"{tid}_exit")
+                    cooldown_ok = (last_alert is None or
+                                   (now - last_alert).total_seconds() > 1200)
+                    if cooldown_ok:
+                        _last_burst_alert[f"{tid}_exit"] = now
+                        log(f"[BURST] ⚠️ EXIT — proj burst FUERA del spread  {title[:50]}")
+                        tg.burst_exit_alert(
+                            label=title, spread_status=spread_status,
+                            rango_burst=rango_burst, pct_completado=pct_completado)
+
+                # Alerta ENTRY: requiere score >= MIN y timing guard NO activo
                 if burst_score >= BURST_SCORE_MIN:
                     last_alert = _last_burst_alert.get(tid)
                     cooldown_ok = (last_alert is None or
                                    (now - last_alert).total_seconds() > 1200)
                     if cooldown_ok:
-                        _last_burst_alert[tid] = now
-                        log(f"[BURST] 🔥 score={burst_score}/5  tw/h={tweets_hora}  "
-                            f"inter={inter_tweet_min:.1f}m  consec={horas_consecutivas}  "
-                            f"{title[:50]}")
+                        if timing_guard_active:
+                            log(f"[BURST] ⏸ score={burst_score}/6 pero timing guard activo "
+                                f"({pct_completado:.0%})  {title[:50]}")
+                        else:
+                            _last_burst_alert[tid] = now
+                            log(f"[BURST] 🔥 score={burst_score}/6  tw/h={tweets_hora}  "
+                                f"inter={inter_tweet_min:.1f}m  consec={horas_consecutivas}  "
+                                f"spread={spread_status}  {title[:50]}")
                         tg.burst_alert(
                             label=title,
                             tweets_hora=tweets_hora,
                             inter_tweet_min=inter_tweet_min,
                             avg_hora=avg_hora,
                             horas_consecutivas=horas_consecutivas,
+                            pct_completado=pct_completado,
                             proj_normal=proj_normal,
                             rango_normal=rango_normal,
                             proj_burst=proj_burst,
                             rango_burst=rango_burst,
-                            burst_score=burst_score)
+                            spread_status=spread_status,
+                            precio_winner=precio_winner,
+                            burst_score=burst_score,
+                            timing_guard_active=timing_guard_active)
 
         except Exception as e:
             log(f"[BURST] Error: {e}")
@@ -842,9 +933,21 @@ def main():
     tg.bot_start(paper.data["capital"])
 
     # Arrancar burst monitor en hilo paralelo
+    _cached_events = []
+    _events_lock = threading.Lock()
+
+    def _get_cached_events():
+        with _events_lock:
+            return list(_cached_events)
+
+    def _set_cached_events(evts):
+        with _events_lock:
+            _cached_events.clear()
+            _cached_events.extend(evts)
+
     burst_thread = threading.Thread(
         target=burst_monitor_loop,
-        args=(tg, lambda: []),
+        args=(tg, _get_cached_events, paper),
         daemon=True)
     burst_thread.start()
     log("[BURST] Hilo iniciado")
@@ -861,6 +964,7 @@ def main():
             log(f"\n{'─'*50} {datetime.now().strftime('%H:%M')}")
 
             events = fetch_active_events()
+            _set_cached_events(events)
             if not events:
                 log("[MAIN] Sin eventos — reintento en 5 min")
                 time.sleep(300)
