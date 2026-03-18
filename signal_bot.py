@@ -40,7 +40,7 @@ except Exception as _e:
 # ── Constantes ──────────────────────────────────────────────────────────
 HIST_MEAN       = 343
 HIST_SIGMA      = 72
-CAPITAL_INIT    = 100.0
+CAPITAL_INIT    = 200.0
 RISK_PER_RANGE  = 0.08
 POLL_MINUTES    = 15
 BURST_POLL_SEC        = 120     # burst monitor cada 2 min
