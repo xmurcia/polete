@@ -50,6 +50,14 @@ BURST_HORAS_MIN       = 2      # horas consecutivas rápidas para considerar sos
 BURST_SCORE_MIN       = 3      # score mínimo para disparar alerta (sobre 6)
 BURST_TIMING_MIN_PCT  = 0.35   # no alertar entrada si evento <35% completado
 BURST_LOW_PRICE_THRESHOLD = 0.10  # por debajo de este precio, señal más fiable
+
+# ── Silence Detector ─────────────────────────────────────────────────
+SILENCE_STREAK_MIN      = 12    # horas consecutivas sin tweets para activar
+SILENCE_RATIO_CRITICAL  = 1.7   # ratio_urgencia → EXIT inmediato
+SILENCE_RATIO_WARNING   = 1.0   # ratio_urgencia → alerta vigilancia
+SILENCE_RATIO_SAFE      = 0.5   # por debajo → no actuar, mercado absorbe
+SILENCE_HREM_MAX        = 72    # solo actuar si quedan menos de 72h
+
 XTRACKER_API    = "https://xtracker.polymarket.com/api"
 HDR             = {"User-Agent": "Mozilla/5.0"}
 MONTH_NAMES     = ["january","february","march","april","may","june",
@@ -195,6 +203,24 @@ class Telegram:
                   f"  BURST desplaza proyección <b>FUERA</b> del spread → considerar salida\n"
                   f"  Rango burst: {rango_burst}\n"
                   f"  Progreso: {pct_completado:.0%}")
+
+    def silence_critical(self, label, racha, cum, w_lo, deficit, ratio, h_rem):
+        self.send(
+            f"🔇 <b>SILENCIO CRÍTICO — {label}</b>\n"
+            f"  Racha sin tweets:  <b>{racha}h</b> consecutivas\n"
+            f"  Tweets acumulados: <b>{cum}</b> / necesita {w_lo} para el rango\n"
+            f"  Déficit:           <b>{deficit}</b> tweets\n"
+            f"  Ratio urgencia:    <b>{ratio:.1f}x</b>  ← necesita {ratio:.1f}x el pace normal\n"
+            f"  Tiempo restante:   <b>{h_rem:.0f}h</b>\n"
+            f"  ⛔ Proyección inviable al pace actual — saliendo de posición")
+
+    def silence_warning(self, label, racha, ratio, h_rem):
+        self.send(
+            f"🔇 <b>SILENCIO SOSTENIDO — {label}</b>\n"
+            f"  Racha sin tweets:  <b>{racha}h</b> consecutivas\n"
+            f"  Ratio urgencia:    <b>{ratio:.1f}x</b>\n"
+            f"  Tiempo restante:   <b>{h_rem:.0f}h</b>\n"
+            f"  ⚠️ Vigilar — si la racha continúa, salida en próximo ciclo")
 
     def scrape_warning(self, label, day_n):
         self.send(f"⚠️ <b>Sin datos tweets D{day_n}</b>\n  {label}", silent=True)
@@ -750,6 +776,68 @@ def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# SILENCE DETECTOR  (independiente del burst detector)
+# ══════════════════════════════════════════════════════════════════════
+
+def calcular_silence_score(event_id, state, positions, h_rem, projected_total):
+    cum_tweets = sum(state.get("muskmeter", {}).get(event_id, {}).values())
+
+    # w_lo: lowest bucket lo across open positions for this event
+    w_lo = None
+    for pos_id, pos in positions.items():
+        if pos.get("slug") == event_id and "-" in pos.get("rng", ""):
+            lo = int(pos["rng"].split("-")[0])
+            if w_lo is None or lo < w_lo:
+                w_lo = lo
+    if w_lo is None:
+        return None
+
+    # racha_silencio from xtracker snapshots
+    snaps = state.get("xtracker_snapshots", {}).get(event_id, {})
+    racha = state.get("silence_streaks", {}).get(event_id, 0)
+    if snaps:
+        sorted_ts = sorted(snaps.keys())
+        if len(sorted_ts) >= 2:
+            prev_val = snaps[sorted_ts[-2]]
+            curr_val = snaps[sorted_ts[-1]]
+            if curr_val > prev_val:
+                racha = 0
+            else:
+                racha += 1
+        # single snapshot — keep existing racha
+    state.setdefault("silence_streaks", {})[event_id] = racha
+
+    # ratio_urgencia
+    if cum_tweets >= w_lo:
+        ratio = 0.0
+        deficit = 0
+    else:
+        deficit = max(0, w_lo - cum_tweets)
+        pace_horario = projected_total / 192  # 8 días × 24h
+        if pace_horario > 0 and h_rem > 0:
+            ratio = (deficit / pace_horario) / h_rem
+        else:
+            ratio = 999.0
+
+    # zona
+    if (ratio >= SILENCE_RATIO_CRITICAL
+            and racha >= SILENCE_STREAK_MIN
+            and h_rem <= SILENCE_HREM_MAX):
+        zona = "CRITICAL"
+    elif (ratio >= SILENCE_RATIO_WARNING
+            and racha >= SILENCE_STREAK_MIN
+            and h_rem <= SILENCE_HREM_MAX):
+        zona = "WARNING"
+    elif ratio <= SILENCE_RATIO_SAFE:
+        zona = "SAFE"
+    else:
+        zona = "NEUTRAL"
+
+    return {"zona": zona, "racha": racha, "ratio": ratio,
+            "deficit": deficit, "cum": cum_tweets, "h_rem": h_rem}
+
+
+# ══════════════════════════════════════════════════════════════════════
 # PAPER BOOK
 # ══════════════════════════════════════════════════════════════════════
 
@@ -883,6 +971,31 @@ class PaperBook:
         if to_close:
             self._save()
 
+    def close_by_slug(self, slug, prices, reason, tg: Telegram):
+        to_close = [(pid, pos) for pid, pos in self.data["positions"].items()
+                     if pos.get("slug") == slug]
+        for pos_id, pos in to_close:
+            exit_p = prices.get(pos["rng"], pos["entry"])
+            pnl = (exit_p - pos["entry"]) * pos["shares"]
+            self.data["capital"] += exit_p * pos["shares"]
+            outcome = "win" if pnl > 0 else "loss"
+            self.data["stats"]["wins" if outcome == "win" else "losses"] += 1
+            self.data["stats"]["pnl"] = round(self.data["stats"].get("pnl", 0) + pnl, 4)
+            self.data["history"].append({"event": pos["event"], "rng": pos["rng"],
+                "entry": pos["entry"], "exit": exit_p, "pnl": round(pnl, 4),
+                "reason": reason, "ts": datetime.now().isoformat()})
+            del self.data["positions"][pos_id]
+            log(f"[PAPER] CLOSE {pos['rng']}  pnl={pnl:+.2f}  {reason}")
+            tg.paper_close(pos["event"], pos["rng"], pos["entry"], exit_p, pnl, reason)
+            self._db_log(action="SELL", market=pos["event"], bucket=pos["rng"],
+                         price=exit_p, shares=pos["shares"], reason=reason,
+                         pnl=pnl, cash_after=self.data["capital"], pos_id=pos_id,
+                         exit_signal_reason=reason, trade_outcome_label=outcome)
+            self._db_close(pos_id, pnl)
+        if to_close:
+            self._save()
+        return len(to_close)
+
     def enrich_positions(self, active_events):
         p_slug = {ev["slug"]: ev["prices"] for ev in active_events}
         return [{**pos, "current_price": p_slug.get(pos["slug"],{}).get(pos["rng"],pos["entry"])}
@@ -901,7 +1014,8 @@ def load_state() -> dict:
         except:
             pass
     return {"muskmeter":{}, "xtracker_snapshots":{},
-            "signals_sent":{}, "prev_totals":{}, "last_weekly":None}
+            "signals_sent":{}, "prev_totals":{}, "last_weekly":None,
+            "silence_streaks":{}}
 
 
 def save_state(state: dict):
@@ -971,6 +1085,46 @@ def main():
                 continue
 
             paper.check_exits(events, tg)
+
+            # ── Silence Detector ──────────────────────────────
+            _silence_cycle = getattr(main, '_silence_cycle', 0)
+            main._silence_cycle = _silence_cycle + 1
+            slugs_with_pos = set(pos["slug"]
+                                 for pos in paper.data["positions"].values())
+            for ev in events:
+                if ev["slug"] not in slugs_with_pos:
+                    continue
+                daily = state.get("muskmeter", {}).get(ev["slug"], {})
+                if daily:
+                    proj, _, _, _ = proyectar(daily, ev["start"])
+                else:
+                    proj = HIST_MEAN
+                sc = calcular_silence_score(
+                    ev["slug"], state, paper.data["positions"],
+                    ev["h_rem"], proj)
+                if sc is None:
+                    continue
+
+                if sc["zona"] == "CRITICAL":
+                    log(f"[SILENCE] CRITICAL — exit ejecutado  "
+                        f"ratio={sc['ratio']:.1f} racha={sc['racha']}h")
+                    w_lo = sc["cum"] + sc["deficit"]
+                    tg.silence_critical(ev["label"], sc["racha"], sc["cum"],
+                                        w_lo, sc["deficit"], sc["ratio"],
+                                        sc["h_rem"])
+                    paper.close_by_slug(ev["slug"], ev["prices"],
+                                        f"Silence CRITICAL (ratio={sc['ratio']:.1f}x "
+                                        f"racha={sc['racha']}h)", tg)
+                elif sc["zona"] == "WARNING":
+                    log(f"[SILENCE] WARNING — monitorizando  "
+                        f"ratio={sc['ratio']:.1f} racha={sc['racha']}h")
+                    tg.silence_warning(ev["label"], sc["racha"],
+                                       sc["ratio"], sc["h_rem"])
+                else:
+                    if main._silence_cycle % 10 == 0:
+                        log(f"[SILENCE] heartbeat — ratio={sc['ratio']:.1f} "
+                            f"racha={sc['racha']}h zona={sc['zona']}")
+            save_state(state)
 
             for ev in events:
                 slug  = ev["slug"]
