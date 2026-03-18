@@ -527,6 +527,8 @@ def scrape_tweets(event: dict, state: dict) -> dict:
         if result:
             log(f"[SCRAPE] muskmeter OK: {len(result)} días")
             merged = {**existing, **result}
+            if sum(merged.values()) > sum(existing.values()):
+                state.setdefault("last_tweet_ts", {})[slug] = datetime.now(tz=timezone.utc).isoformat()
             return merged
     except Exception as e:
         log(f"[SCRAPE] muskmeter falló: {e}")
@@ -542,6 +544,8 @@ def scrape_tweets(event: dict, state: dict) -> dict:
             merged = {**fresh_days, **existing}
             if merged:
                 log(f"[SCRAPE] xtracker OK: total={total}  cache+snap={len(merged)} días")
+                if sum(merged.values()) > sum(existing.values()):
+                    state.setdefault("last_tweet_ts", {})[slug] = datetime.now(tz=timezone.utc).isoformat()
                 return merged
     except Exception as e:
         log(f"[SCRAPE] xtracker falló: {e}")
@@ -724,7 +728,7 @@ def fetch_active_events() -> list:
 # MOTOR DE SEÑALES
 # ══════════════════════════════════════════════════════════════════════
 
-def proyectar(daily: dict, start: str) -> tuple:
+def proyectar(daily: dict, start: str, prev_total=None) -> tuple:
     days = sorted(daily.items())
     if not days:
         return HIST_MEAN, HIST_SIGMA, 0, 0
@@ -739,7 +743,8 @@ def proyectar(daily: dict, start: str) -> tuple:
     start_dt  = datetime.strptime(start, "%Y-%m-%d")
     days_left = max(0, 8 - (last_date - start_dt).days - 1)
     proj_pace  = cum + pace_base * days_left
-    proj_blend = 0.50*proj_pace + 0.30*HIST_MEAN + 0.20*HIST_MEAN
+    hist_ref   = prev_total if prev_total and 150 < prev_total < 600 else HIST_MEAN
+    proj_blend = 0.50*proj_pace + 0.30*hist_ref + 0.20*HIST_MEAN
     sigma      = max(40, HIST_SIGMA - n*4)
     return round(proj_blend), round(sigma), n, round(pace_mean, 1)
 
@@ -761,7 +766,7 @@ def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
     if day_n < 3 or day_n > 5 or len(daily) < 3 or not prices:
         return None
 
-    proj, sigma, n_days, pace = proyectar(daily, event["start"])
+    proj, sigma, n_days, pace = proyectar(daily, event["start"], prev_total)
     vals  = list(daily.values())
     pace3 = sum(vals[:3])/3 if len(vals) >= 3 else pace
     confidence = "ALTA" if (pace3 > 50 or pace3 < 25 or max(vals[:3]) > 60) else "MEDIA"
@@ -822,19 +827,14 @@ def calcular_silence_score(event_id, state, positions, h_rem, projected_total):
     if w_lo is None:
         return None
 
-    # racha_silencio from xtracker snapshots
-    snaps = state.get("xtracker_snapshots", {}).get(event_id, {})
-    racha = state.get("silence_streaks", {}).get(event_id, 0)
-    if snaps:
-        sorted_ts = sorted(snaps.keys())
-        if len(sorted_ts) >= 2:
-            prev_val = snaps[sorted_ts[-2]]
-            curr_val = snaps[sorted_ts[-1]]
-            if curr_val > prev_val:
-                racha = 0
-            else:
-                racha += 1
-        # single snapshot — keep existing racha
+    # racha_silencio from real timestamps
+    last_ts_str = state.get("last_tweet_ts", {}).get(event_id)
+    if last_ts_str:
+        last_ts = datetime.fromisoformat(last_ts_str)
+        racha = int((datetime.now(tz=timezone.utc) - last_ts).total_seconds() / 3600)
+    else:
+        racha = 0
+    # Persist for heartbeat/logging (not for the calculation)
     state.setdefault("silence_streaks", {})[event_id] = racha
 
     # ratio_urgencia
@@ -1006,18 +1006,18 @@ class PaperBook:
                     if day_n >= 2:
                         cum_tweets = ev.get("count", 0)
                         daily = (state or {}).get("muskmeter", {}).get(slug, {})
-                        if daily:
-                            proj_total, _, _, _ = proyectar(daily, ev["start"])
+                        if not daily:
+                            pass  # sin datos de tweets → no ejecutar Physical Exit, skip este nivel
                         else:
-                            proj_total = HIST_MEAN
-                        pace_horario = proj_total / 192
-                        max_posible = pace_horario * 2 * max(0, h_rem)
-                        w_lo = int(pos["rng"].split("-")[0])
-                        if cum_tweets + max_posible < w_lo * 0.95:
-                            if reason is None:
-                                reason = (f"Physical Exit (need {w_lo} tweets, "
-                                          f"max {cum_tweets + max_posible:.0f} possible)")
-                                nivel = "Physical Exit"
+                            proj_total, _, _, _ = proyectar(daily, ev["start"])
+                            pace_horario = proj_total / 192
+                            max_posible = cum_tweets + pace_horario * 2 * max(0, h_rem)
+                            w_lo = int(pos["rng"].split("-")[0])
+                            if max_posible < w_lo * 0.95:
+                                if reason is None:
+                                    reason = (f"Physical Exit (need {w_lo} tweets, "
+                                              f"max {max_posible:.0f} possible)")
+                                    nivel = "Physical Exit"
 
                 # ── NIVEL 4 — Stop Loss adaptativo ──
                 if reason is None and pct <= -0.40 and h_rem > 24:
@@ -1114,7 +1114,7 @@ def load_state() -> dict:
             pass
     return {"muskmeter":{}, "xtracker_snapshots":{},
             "signals_sent":{}, "prev_totals":{}, "last_weekly":None,
-            "silence_streaks":{}}
+            "silence_streaks":{}, "last_tweet_ts":{}}
 
 
 def save_state(state: dict):
