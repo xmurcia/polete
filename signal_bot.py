@@ -140,6 +140,15 @@ class Telegram:
                   f"  {entry*100:.1f}¢ → {exit_p*100:.1f}¢  ({roi:+.0f}%)\n"
                   f"  P&amp;L: <b>${pnl:+.2f}</b>  |  {reason}")
 
+    def paper_exit(self, nivel, label, rng, entry, exit_p, pnl_pct, pnl_usd, reason, capital):
+        self.send(
+            f"📤 <b>EXIT — {nivel} — {label}</b>\n"
+            f"  Rango:   {rng}\n"
+            f"  Entrada: {entry:.3f}  →  Salida: {exit_p:.3f}\n"
+            f"  PnL:     {pnl_pct:+.0%}  ({pnl_usd:+.2f}$)\n"
+            f"  Razón:   {reason}\n"
+            f"  Capital: ${capital:.2f}")
+
     def portfolio_summary(self, capital, positions, stats):
         roi = (capital - CAPITAL_INIT) / CAPITAL_INIT * 100
         w, l = stats["wins"], stats["losses"]
@@ -919,39 +928,103 @@ class PaperBook:
         self._save()
         return bought
 
-    def check_exits(self, active_events: list, tg: Telegram):
+    def check_exits(self, active_events: list, tg: Telegram, state: dict = None):
         p_slug = {ev["slug"]: ev["prices"] for ev in active_events}
         h_slug = {ev["slug"]: ev["h_rem"]  for ev in active_events}
+        ev_slug = {ev["slug"]: ev for ev in active_events}
         to_close = []
-        for pos_id, pos in self.data["positions"].items():
-            cp    = p_slug.get(pos["slug"], {}).get(pos["rng"], pos["entry"])
-            pct   = (cp - pos["entry"]) / pos["entry"]
-            h_rem = h_slug.get(pos["slug"], 100)
-            reason, exit_p = None, cp
 
-            # Victory Lap: precio casi resuelto en las últimas 48h
-            if h_rem <= 48 and cp >= 0.97:
-                reason = f"Victory Lap ({cp:.2f})"
-            # Paranoid Treasure: beneficio ≥ 80% en las últimas 48h
-            # Fuera de esa ventana dejamos correr las ganancias
-            elif h_rem <= 48 and pct >= 0.80:
-                reason = f"Paranoid Treasure (+{pct*100:.0f}%)"
-            # Stop Loss
-            elif pos["entry"] < 0.15 and pct < -0.80:
-                reason = f"Stop Loss ({pct*100:.0f}%)"
-            elif pos["entry"] >= 0.15 and pct < -0.40:
-                reason = f"Stop Loss ({pct*100:.0f}%)"
-            # Evento expirado
-            elif h_rem < -2:
-                reason, exit_p = "Evento expirado", max(cp, 0.01)
-            # Prune final: precio irrecuperable en últimas 24h
-            elif h_rem <= 24 and cp < 0.05:
-                reason = f"Prune final ({cp*100:.1f}¢)"
+        # Pre-compute silence scores per slug (for Level 5)
+        silence_by_slug = {}
+        if state is not None:
+            slugs_with_pos = set(pos["slug"]
+                                 for pos in self.data["positions"].values())
+            for ev in active_events:
+                if ev["slug"] not in slugs_with_pos:
+                    continue
+                daily = state.get("muskmeter", {}).get(ev["slug"], {})
+                if daily:
+                    proj, _, _, _ = proyectar(daily, ev["start"])
+                else:
+                    proj = HIST_MEAN
+                sc = calcular_silence_score(
+                    ev["slug"], state, self.data["positions"],
+                    ev["h_rem"], proj)
+                if sc is not None:
+                    silence_by_slug[ev["slug"]] = sc
+
+        for pos_id, pos in self.data["positions"].items():
+            slug  = pos["slug"]
+            cp    = p_slug.get(slug, {}).get(pos["rng"], None)
+            h_rem = h_slug.get(slug, 100)
+            ev    = ev_slug.get(slug)
+            reason, exit_p, nivel = None, None, None
+
+            # ── Expired: no price available ──
+            if cp is None:
+                reason = "Expired (no price available)"
+                exit_p = 0.01
+                nivel = "EXPIRED"
+            else:
+                exit_p = cp
+                pct = (cp - pos["entry"]) / pos["entry"] if pos["entry"] > 0 else 0
+
+                # ── NIVEL 1 — Victory Lap ──
+                if h_rem <= 48 and cp >= 0.97:
+                    reason = f"Victory Lap ({cp:.2f})"
+                    nivel = "Victory Lap"
+
+                # ── NIVEL 2 — Paranoid Treasure ──
+                elif h_rem <= 48 and pct >= 0.80:
+                    reason = f"Paranoid Treasure (+{pct*100:.0f}%)"
+                    nivel = "Paranoid Treasure"
+
+                # ── NIVEL 3 — Physical Exit ──
+                elif ev is not None and "-" in pos.get("rng", ""):
+                    day_n = pos.get("day_n", ev.get("day_n", 1))
+                    if day_n >= 2:
+                        cum_tweets = ev.get("count", 0)
+                        daily = (state or {}).get("muskmeter", {}).get(slug, {})
+                        if daily:
+                            proj_total, _, _, _ = proyectar(daily, ev["start"])
+                        else:
+                            proj_total = HIST_MEAN
+                        pace_horario = proj_total / 192
+                        max_posible = pace_horario * 2 * max(0, h_rem)
+                        w_lo = int(pos["rng"].split("-")[0])
+                        if cum_tweets + max_posible < w_lo * 0.95:
+                            if reason is None:
+                                reason = (f"Physical Exit (need {w_lo} tweets, "
+                                          f"max {cum_tweets + max_posible:.0f} possible)")
+                                nivel = "Physical Exit"
+
+                # ── NIVEL 4 — Stop Loss adaptativo ──
+                if reason is None and pct <= -0.40 and h_rem > 24:
+                    reason = f"Stop Loss ({pct*100:.0f}%)"
+                    nivel = "Stop Loss"
+
+                # ── NIVEL 5 — Silence Critical ──
+                if reason is None and slug in silence_by_slug:
+                    sc = silence_by_slug[slug]
+                    if sc["zona"] == "CRITICAL":
+                        reason = (f"Silence Critical "
+                                  f"(racha={sc['racha']}h ratio={sc['ratio']:.1f})")
+                        nivel = "Silence Critical"
+
+                # ── NIVEL 6 — Catastrophic Loss ──
+                if reason is None and pct <= -0.75:
+                    reason = f"Catastrophic Loss ({pct*100:.0f}%)"
+                    nivel = "Catastrophic Loss"
+
+                # ── NIVEL 7 — Prune final ──
+                if reason is None and h_rem <= 24 and cp < 0.05:
+                    reason = f"Prune (<5¢ con {h_rem:.0f}h restantes)"
+                    nivel = "Prune"
 
             if reason:
-                to_close.append((pos_id, pos, exit_p, reason))
+                to_close.append((pos_id, pos, exit_p, reason, nivel))
 
-        for pos_id, pos, exit_p, reason in to_close:
+        for pos_id, pos, exit_p, reason, nivel in to_close:
             pnl = (exit_p - pos["entry"]) * pos["shares"]
             self.data["capital"] += exit_p * pos["shares"]
             outcome = "win" if pnl > 0 else "loss"
@@ -961,8 +1034,12 @@ class PaperBook:
                 "entry":pos["entry"],"exit":exit_p,"pnl":round(pnl,4),
                 "reason":reason,"ts":datetime.now().isoformat()})
             del self.data["positions"][pos_id]
-            log(f"[PAPER] CLOSE {pos['rng']}  pnl={pnl:+.2f}  {reason}")
-            tg.paper_close(pos["event"],pos["rng"],pos["entry"],exit_p,pnl,reason)
+            pnl_pct = (exit_p - pos["entry"]) / pos["entry"] if pos["entry"] > 0 else 0
+            log(f"[EXIT] {nivel} | {pos['event']} | {pos['rng']} | "
+                f"entry={pos['entry']:.3f} exit={exit_p:.3f} | "
+                f"pnl={pnl_pct:+.0%} | reason={reason}")
+            tg.paper_exit(nivel, pos["event"], pos["rng"], pos["entry"],
+                          exit_p, pnl_pct, pnl, reason, self.data["capital"])
             self._db_log(action="SELL",market=pos["event"],bucket=pos["rng"],
                          price=exit_p,shares=pos["shares"],reason=reason,
                          pnl=pnl,cash_after=self.data["capital"],pos_id=pos_id,
@@ -970,6 +1047,7 @@ class PaperBook:
             self._db_close(pos_id, pnl)
         if to_close:
             self._save()
+        return len(self.data["positions"])
 
     def close_by_slug(self, slug, prices, reason, tg: Telegram):
         to_close = [(pid, pos) for pid, pos in self.data["positions"].items()
@@ -1084,9 +1162,9 @@ def main():
                 time.sleep(300)
                 continue
 
-            paper.check_exits(events, tg)
+            n_monitored = paper.check_exits(events, tg, state)
 
-            # ── Silence Detector ──────────────────────────────
+            # ── Silence Detector (WARNING alerts only — CRITICAL handled in check_exits) ──
             _silence_cycle = getattr(main, '_silence_cycle', 0)
             main._silence_cycle = _silence_cycle + 1
             slugs_with_pos = set(pos["slug"]
@@ -1104,27 +1182,19 @@ def main():
                     ev["h_rem"], proj)
                 if sc is None:
                     continue
-
-                if sc["zona"] == "CRITICAL":
-                    log(f"[SILENCE] CRITICAL — exit ejecutado  "
-                        f"ratio={sc['ratio']:.1f} racha={sc['racha']}h")
-                    w_lo = sc["cum"] + sc["deficit"]
-                    tg.silence_critical(ev["label"], sc["racha"], sc["cum"],
-                                        w_lo, sc["deficit"], sc["ratio"],
-                                        sc["h_rem"])
-                    paper.close_by_slug(ev["slug"], ev["prices"],
-                                        f"Silence CRITICAL (ratio={sc['ratio']:.1f}x "
-                                        f"racha={sc['racha']}h)", tg)
-                elif sc["zona"] == "WARNING":
+                if sc["zona"] == "WARNING":
                     log(f"[SILENCE] WARNING — monitorizando  "
                         f"ratio={sc['ratio']:.1f} racha={sc['racha']}h")
                     tg.silence_warning(ev["label"], sc["racha"],
                                        sc["ratio"], sc["h_rem"])
-                else:
-                    if main._silence_cycle % 10 == 0:
-                        log(f"[SILENCE] heartbeat — ratio={sc['ratio']:.1f} "
-                            f"racha={sc['racha']}h zona={sc['zona']}")
+                elif main._silence_cycle % 10 == 0 and sc["zona"] not in ("CRITICAL",):
+                    log(f"[SILENCE] heartbeat — ratio={sc['ratio']:.1f} "
+                        f"racha={sc['racha']}h zona={sc['zona']}")
             save_state(state)
+
+            # ── Heartbeat exits ──
+            if main._silence_cycle % 10 == 0:
+                log(f"[EXITS] check OK — {n_monitored} posiciones monitorizadas")
 
             for ev in events:
                 slug  = ev["slug"]
