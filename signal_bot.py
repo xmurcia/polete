@@ -43,12 +43,22 @@ HIST_SIGMA      = 72
 CAPITAL_INIT    = 100.0
 RISK_PER_RANGE  = 0.08
 POLL_MINUTES    = 15
-BURST_POLL_SEC  = 120         # burst monitor cada 2 min
-BURST_THRESHOLD = 4.0         # tweets/hora para alertar
+BURST_POLL_SEC        = 120     # burst monitor cada 2 min
+BURST_INTER_TWEET_MIN = 5.0    # minutos entre tweets para considerar burst
+BURST_SORPRESA_MULT   = 2.5    # multiplicador sobre AVG histórico de esa hora
+BURST_HORAS_MIN       = 2      # horas consecutivas rápidas para considerar sostenido
+BURST_SCORE_MIN       = 3      # score mínimo para disparar alerta
 XTRACKER_API    = "https://xtracker.polymarket.com/api"
 HDR             = {"User-Agent": "Mozilla/5.0"}
 MONTH_NAMES     = ["january","february","march","april","may","june",
                    "july","august","september","october","november","december"]
+
+AVG_POR_HORA = {
+    0: 1.2, 1: 1.2, 2: 5.0, 3: 3.6, 4: 0.3, 5: 0.0,
+    6: 0.0, 7: 1.3, 8: 3.5, 9: 4.3, 10: 0.3, 11: 2.5,
+    12: 2.0, 13: 0.8, 14: 2.2, 15: 1.6, 16: 0.4, 17: 0.0,
+    18: 2.0, 19: 1.0, 20: 0.0, 21: 0.0, 22: 0.8, 23: 1.0
+}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -151,13 +161,23 @@ class Telegram:
                   f"  ROI total: <b>{roi:+.1f}%</b>\n\n"
                   f"  ⏰ {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
-    def burst_alert(self, label, pace, n_tweets, examples):
-        mins = BURST_POLL_SEC // 60
-        self.send(f"🔥 <b>BURST DETECTADO — {label}</b>\n"
-                  f"  Pace:    <b>{pace:.0f} tweets/hora</b>\n"
-                  f"  Últimos: <b>{n_tweets} tweets</b> en {mins} min\n"
-                  f"  Ejemplo: {examples[0][:80] if examples else '—'}\n"
-                  f"  ⚡ El mercado tardará ~15 min en ajustarse")
+    def burst_alert(self, label, tweets_hora, inter_tweet_min, avg_hora,
+                    horas_consecutivas, proj_normal, rango_normal,
+                    proj_burst, rango_burst, burst_score):
+        lines = [
+            f"🔥 <b>BURST DETECTADO — {label}</b>",
+            f"  Tweets esta hora: <b>{tweets_hora}</b>",
+            f"  Inter-tweet: <b>{inter_tweet_min:.1f} min</b>",
+            f"  Sorpresa: <b>{tweets_hora/avg_hora:.1f}x</b> sobre AVG ({avg_hora})" if avg_hora > 0 else f"  Sorpresa: N/A (AVG=0)",
+            f"  Horas consecutivas rápidas: <b>{horas_consecutivas}</b>",
+            f"  Proyección normal: <b>{proj_normal:.0f}</b> tweets → rango {rango_normal}",
+            f"  Proyección burst:  <b>{proj_burst:.0f}</b> tweets → rango {rango_burst}",
+            f"  Burst score: <b>{burst_score}/5</b>",
+            f"  ⚡ El mercado tardará ~15 min en ajustarse",
+        ]
+        if rango_burst == rango_normal:
+            lines.append(f"  ⚠️ No desplaza rango — impacto en precio limitado")
+        self.send("\n".join(lines))
 
     def scrape_warning(self, label, day_n):
         self.send(f"⚠️ <b>Sin datos tweets D{day_n}</b>\n  {label}", silent=True)
@@ -180,24 +200,41 @@ class Telegram:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# BURST MONITOR  (hilo paralelo — xtracker delta)
-# Nitter no funciona desde Railway. Usamos xtracker: comparamos el
-# total acumulado entre polls de 2 min. Si pace > BURST_THRESHOLD → alerta.
+# BURST MONITOR  (hilo paralelo — burst score multidimensional)
+# 4 dimensiones: frecuencia, sorpresa horaria, sostenibilidad, desplazamiento.
 # Heartbeat en log cada 10 ciclos (~20 min) para confirmar que está vivo.
 # ══════════════════════════════════════════════════════════════════════
 
 _burst_prev_totals = {}   # tid → (total, datetime)
-_last_burst_alert  = None
+_burst_hourly_snap = {}   # tid → {hora_utc: tweets_en_esa_hora}
+_burst_horas_rapidas = {}  # tid → contador de horas consecutivas rápidas
+_burst_last_hora_rapida = {}  # tid → última hora UTC que fue rápida
+_last_burst_alert  = {}   # tid → datetime del último alert
+
+
+def _rango_de(proj, buckets):
+    for b in buckets:
+        rng = b.get("bucket", "")
+        if "-" not in rng:
+            continue
+        lo, hi = int(rng.split("-")[0]), int(rng.split("-")[1])
+        if lo <= proj <= hi:
+            return rng
+    if buckets:
+        maxb = max(buckets, key=lambda b: int(b.get("bucket","0-0").split("-")[-1]))
+        return maxb.get("bucket", "???")
+    return "???"
 
 
 def burst_monitor_loop(tg: Telegram, get_events_fn):
-    global _last_burst_alert
-    log("[BURST] Monitor iniciado — xtracker delta")
+    log("[BURST] Monitor iniciado — burst score multidimensional")
     cycle = 0
 
     while True:
         try:
             now = datetime.now(tz=timezone.utc)
+            hora_actual = now.hour
+
             r   = requests.get(f"{XTRACKER_API}/users/elonmusk",
                                headers=HDR, timeout=15)
             r.raise_for_status()
@@ -206,51 +243,131 @@ def burst_monitor_loop(tg: Telegram, get_events_fn):
                          if isinstance(data.get("data"), dict)
                          else data.get("trackings", []))
 
-            max_pace    = 0.0
-            max_delta   = 0
-            burst_label = ""
+            events = get_events_fn()
 
             for t in trackings:
                 tid   = t.get("id", "")
                 title = t.get("title", "")
                 if not tid or "tweet" not in title.lower():
                     continue
+
                 try:
                     r2    = requests.get(
                         f"{XTRACKER_API}/trackings/{tid}?includeStats=true",
                         headers=HDR, timeout=10)
-                    total = int(r2.json().get("data", {})
-                                .get("stats", {}).get("total", 0))
+                    tdata = r2.json().get("data", {})
+                    total = int(tdata.get("stats", {}).get("total", 0))
                 except Exception:
                     continue
 
+                # Calcular tweets en la hora actual via delta
+                snap = _burst_hourly_snap.setdefault(tid, {})
                 if tid in _burst_prev_totals:
                     prev_total, prev_ts = _burst_prev_totals[tid]
-                    delta    = max(0, total - prev_total)
-                    interval = (now - prev_ts).total_seconds() / 3600
-                    if 0 < interval < 1:   # solo polls recientes
-                        pace = delta / interval
-                        if pace > max_pace:
-                            max_pace    = pace
-                            max_delta   = delta
-                            burst_label = title
+                    delta = max(0, total - prev_total)
+                    if prev_ts.hour == hora_actual:
+                        snap[hora_actual] = snap.get(hora_actual, 0) + delta
+                    else:
+                        snap[hora_actual] = delta
+                else:
+                    snap[hora_actual] = 0
 
                 _burst_prev_totals[tid] = (total, now)
 
-            # Heartbeat cada 10 ciclos (~20 min)
-            cycle += 1
-            if cycle % 10 == 0:
-                log(f"[BURST] heartbeat — max_pace={max_pace:.1f}/h  "
-                    f"trackings={len(trackings)}")
+                tweets_hora = snap.get(hora_actual, 0)
+                if tweets_hora < 1:
+                    continue
 
-            if max_pace >= BURST_THRESHOLD and max_delta > 0:
-                cooldown_ok = (_last_burst_alert is None or
-                               (now - _last_burst_alert).total_seconds() > 1200)
-                if cooldown_ok:
-                    _last_burst_alert = now
-                    log(f"[BURST] 🔥 pace={max_pace:.0f}/h  delta={max_delta}  {burst_label[:50]}")
-                    tg.burst_alert(label=burst_label, pace=max_pace,
-                                   n_tweets=max_delta, examples=[])
+                # ── Burst Score ──────────────────────────────────
+                burst_score = 0
+                inter_tweet_min = 60.0 / tweets_hora if tweets_hora > 0 else 999
+
+                # Dim 1 — Frecuencia
+                dim1 = False
+                if tweets_hora >= 3 and inter_tweet_min < BURST_INTER_TWEET_MIN:
+                    burst_score += 1
+                    dim1 = True
+
+                # Dim 2 — Sorpresa horaria
+                avg_hora = AVG_POR_HORA.get(hora_actual, 1.0)
+                if avg_hora > 0 and tweets_hora / avg_hora > BURST_SORPRESA_MULT:
+                    burst_score += 1
+
+                # Dim 3 — Sostenibilidad (horas consecutivas rápidas)
+                last_rapida = _burst_last_hora_rapida.get(tid)
+                if dim1:
+                    if last_rapida is not None and hora_actual == (last_rapida + 1) % 24:
+                        _burst_horas_rapidas[tid] = _burst_horas_rapidas.get(tid, 1) + 1
+                    else:
+                        _burst_horas_rapidas[tid] = 1
+                    _burst_last_hora_rapida[tid] = hora_actual
+                else:
+                    _burst_horas_rapidas[tid] = 0
+
+                horas_consecutivas = _burst_horas_rapidas.get(tid, 0)
+                if horas_consecutivas >= BURST_HORAS_MIN:
+                    burst_score += 1
+
+                # Dim 4 — Desplazamiento de proyección (vale doble)
+                ev_match = next((e for e in events
+                                 if title.lower() in e.get("label","").lower()
+                                 or e.get("label","").lower() in title.lower()), None)
+                cum_total = total
+                h_rem = ev_match["h_rem"] if ev_match else 0
+                buckets = ev_match.get("_buckets", []) if ev_match else []
+
+                # pace normal = mediana de días anteriores (del state muskmeter)
+                pace_normal = HIST_MEAN / 7  # fallback
+                if ev_match:
+                    try:
+                        from pathlib import Path as _P
+                        sf = _P(__file__).parent / "logs" / "signals" / "signal_bot_state.json"
+                        if sf.exists():
+                            import json as _j
+                            st = _j.loads(sf.read_text())
+                            daily = st.get("muskmeter", {}).get(ev_match["slug"], {})
+                            if daily:
+                                vals = sorted(daily.values())
+                                pace_normal = vals[len(vals) // 2]
+                    except Exception:
+                        pass
+
+                horas_restantes = max(0, h_rem)
+                proj_normal = cum_total + pace_normal * horas_restantes / 24
+                proj_burst  = cum_total + tweets_hora * horas_restantes
+
+                rango_normal = _rango_de(proj_normal, buckets)
+                rango_burst  = _rango_de(proj_burst, buckets)
+
+                if rango_burst != rango_normal:
+                    burst_score += 2
+
+                # ── Alerta ───────────────────────────────────────
+                cycle += 1
+                if cycle % 10 == 0:
+                    log(f"[BURST] heartbeat — {title[:40]}  score={burst_score}  "
+                        f"tw/h={tweets_hora}  trackings={len(trackings)}")
+
+                if burst_score >= BURST_SCORE_MIN:
+                    last_alert = _last_burst_alert.get(tid)
+                    cooldown_ok = (last_alert is None or
+                                   (now - last_alert).total_seconds() > 1200)
+                    if cooldown_ok:
+                        _last_burst_alert[tid] = now
+                        log(f"[BURST] 🔥 score={burst_score}/5  tw/h={tweets_hora}  "
+                            f"inter={inter_tweet_min:.1f}m  consec={horas_consecutivas}  "
+                            f"{title[:50]}")
+                        tg.burst_alert(
+                            label=title,
+                            tweets_hora=tweets_hora,
+                            inter_tweet_min=inter_tweet_min,
+                            avg_hora=avg_hora,
+                            horas_consecutivas=horas_consecutivas,
+                            proj_normal=proj_normal,
+                            rango_normal=rango_normal,
+                            proj_burst=proj_burst,
+                            rango_burst=rango_burst,
+                            burst_score=burst_score)
 
         except Exception as e:
             log(f"[BURST] Error: {e}")
