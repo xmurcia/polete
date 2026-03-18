@@ -511,6 +511,14 @@ def scrape_tweets(event: dict, state: dict) -> dict:
     Returns: dict con todos los días conocidos del evento.
     """
     slug     = event["slug"]
+
+    # Guard: evento futuro — no scrape
+    event_start = datetime.strptime(event["start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    now = datetime.now(tz=timezone.utc)
+    if now < event_start:
+        log(f"[SCRAPE] {slug}: evento futuro (start={event['start']}) — skip")
+        return {"tweets": {}, "total": 0, "dias": 0}
+
     existing = state.get("muskmeter", {}).get(slug, {})
 
     # Método 1: muskmeter
@@ -689,6 +697,12 @@ def fetch_active_events() -> list:
                 if rng and ask > 0:
                     prices[rng] = ask
 
+        # Guard: evento futuro — count=0, no scrape
+        is_future = now < start_dt.replace(tzinfo=timezone.utc)
+        if is_future:
+            count   = 0
+            day_n   = 0
+
         result.append({
             "slug": slug, "label": title,
             "start": start_dt.strftime("%Y-%m-%d"),
@@ -698,8 +712,10 @@ def fetch_active_events() -> list:
             "h_rem": h_rem, "count": count,
             "prices": prices, "_buckets": buckets,
         })
-        log(f"[EVENTS] {title[:45]}  D{day_n}  {series}  "
-            f"h_rem={h_rem:.0f}h  count={count}  precios={len(prices)}")
+        dow = ["mon","tue","wed","thu","fri","sat","sun"][start_dt.weekday()]
+        tag = "  FUTURO" if is_future else ""
+        log(f"[EVENTS] {title[:45]}  D{day_n}  {dow}  "
+            f"h_rem={h_rem:.0f}h  count={count}{tag}")
 
     return result
 
@@ -735,6 +751,11 @@ def rp(lo, hi, mu, sigma):
 
 
 def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
+    # Guard: nunca generar señal para evento futuro
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    if event["start"] > today:
+        return None
+
     day_n  = event["day_n"]
     prices = event["prices"]
     if day_n < 3 or day_n > 5 or len(daily) < 3 or not prices:
