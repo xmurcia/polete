@@ -264,17 +264,32 @@ _burst_last_hora_rapida = {}  # tid → última hora UTC que fue rápida
 _last_burst_alert  = {}   # tid → datetime del último alert
 
 
+def _parse_range(rng):
+    """Parse 'lo-hi' bucket string. Returns (lo, hi) or None for open-ended like '580+'."""
+    if "-" not in rng or "+" in rng:
+        return None
+    parts = rng.split("-")
+    try:
+        return int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        return None
+
+
 def _rango_de(proj, buckets):
     for b in buckets:
         rng = b.get("bucket", "")
-        if "-" not in rng:
+        parsed = _parse_range(rng)
+        if parsed is None:
             continue
-        lo, hi = int(rng.split("-")[0]), int(rng.split("-")[1])
+        lo, hi = parsed
         if lo <= proj <= hi:
             return rng
     if buckets:
-        maxb = max(buckets, key=lambda b: int(b.get("bucket","0-0").split("-")[-1]))
-        return maxb.get("bucket", "???")
+        valid = [(b, _parse_range(b.get("bucket", ""))) for b in buckets]
+        valid = [(b, p) for b, p in valid if p is not None]
+        if valid:
+            maxb = max(valid, key=lambda x: x[1][1])
+            return maxb[0].get("bucket", "???")
     return "???"
 
 
@@ -435,9 +450,10 @@ def burst_monitor_loop(tg: Telegram, get_events_fn, paper_book=None):
                         # buscar rango más cercano a proj_burst
                         best_dist = float("inf")
                         for rng, p in prices.items():
-                            if "-" not in rng:
+                            parsed = _parse_range(rng)
+                            if parsed is None:
                                 continue
-                            mid = (int(rng.split("-")[0]) + int(rng.split("-")[1])) / 2
+                            mid = (parsed[0] + parsed[1]) / 2
                             d = abs(mid - proj_burst)
                             if d < best_dist:
                                 best_dist = d
@@ -767,15 +783,15 @@ def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
     confidence = "ALTA" if (pace3 > 50 or pace3 < 25 or max(vals[:3]) > 60) else "MEDIA"
 
     cum_total = sum(daily.values())
-    rangos = sorted([r for r in prices if "-" in r
-                     and int(r.split("-")[1]) > cum_total],
-                    key=lambda x: int(x.split("-")[0]))
+    rangos = sorted([r for r in prices if _parse_range(r) is not None
+                     and _parse_range(r)[1] > cum_total],
+                    key=lambda x: _parse_range(x)[0])
     best = []
     for i in range(len(rangos)):
         for j in range(i+1, min(i+6, len(rangos))):
             sub   = rangos[i:j+1]
             cost  = sum(prices.get(r, 0) for r in sub)
-            p_win = sum(rp(int(r.split("-")[0]), int(r.split("-")[0])+19,
+            p_win = sum(rp(_parse_range(r)[0], _parse_range(r)[0]+19,
                            proj, sigma) for r in sub)
             if 0.05 < cost < 0.80 and len(sub) >= 2 and p_win > 0.05:
                 ev = p_win/cost - 1
@@ -792,9 +808,9 @@ def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
     no_signals = [{"range": rng, "price_no": round(1-p,3),
                    "roi_no": round(1/(1-p)-1,3)}
                   for rng, p in prices.items()
-                  if "-" in rng
-                  and (int(rng.split("-")[1]) < ci_lo-15
-                       or int(rng.split("-")[0]) > ci_hi+15)
+                  if _parse_range(rng) is not None
+                  and (_parse_range(rng)[1] < ci_lo-15
+                       or _parse_range(rng)[0] > ci_hi+15)
                   and p > 0.08][:3]
 
     return {"event": event["label"], "slug": event["slug"],
@@ -815,8 +831,9 @@ def calcular_silence_score(event_id, state, positions, h_rem, projected_total):
     # w_lo: lowest bucket lo across open positions for this event
     w_lo = None
     for pos_id, pos in positions.items():
-        if pos.get("slug") == event_id and "-" in pos.get("rng", ""):
-            lo = int(pos["rng"].split("-")[0])
+        parsed = _parse_range(pos.get("rng", ""))
+        if pos.get("slug") == event_id and parsed is not None:
+            lo = parsed[0]
             if w_lo is None or lo < w_lo:
                 w_lo = lo
     if w_lo is None:
@@ -1012,7 +1029,10 @@ class PaperBook:
                             proj_total = HIST_MEAN
                         pace_horario = proj_total / 192
                         max_posible = pace_horario * 2 * max(0, h_rem)
-                        w_lo = int(pos["rng"].split("-")[0])
+                        _pr = _parse_range(pos.get("rng", ""))
+                        if _pr is None:
+                            continue
+                        w_lo = _pr[0]
                         if cum_tweets + max_posible < w_lo * 0.95:
                             if reason is None:
                                 reason = (f"Physical Exit (need {w_lo} tweets, "
