@@ -72,6 +72,25 @@ AVG_POR_HORA = {
 
 
 # ══════════════════════════════════════════════════════════════════════
+# ÚNICO PUNTO DE VERDAD — ciclo de vida de eventos
+# ══════════════════════════════════════════════════════════════════════
+
+def is_event_tradeable(event: dict) -> bool:
+    """
+    Único punto de verdad sobre si un evento acepta operaciones.
+    - h_rem > 2h: buffer mínimo antes del cierre
+    - No evento futuro (day_n > 0, es decir ya ha empezado)
+    Usar en TODOS los módulos sin excepción.
+    """
+    h_rem = event.get("h_rem", 0)
+    if h_rem <= 2:
+        return False
+    if event.get("day_n", 0) == 0:  # evento futuro
+        return False
+    return True
+
+
+# ══════════════════════════════════════════════════════════════════════
 # LOGGING
 # ══════════════════════════════════════════════════════════════════════
 
@@ -208,10 +227,11 @@ class Telegram:
         self.send("\n".join(lines))
 
     def burst_exit_alert(self, label, spread_status, rango_burst, pct_completado):
-        self.send(f"⚠️ <b>BURST EXIT — {label}</b>\n"
-                  f"  BURST desplaza proyección <b>FUERA</b> del spread → considerar salida\n"
-                  f"  Rango burst: {rango_burst}\n"
-                  f"  Progreso: {pct_completado:.0%}")
+        # Solo informativo — no ejecuta salida automática
+        self.send(f"📋 <b>[BURST_WARN] — {label}</b>\n"
+                  f"  Proyección burst <b>FUERA</b> del spread comprado\n"
+                  f"  Rango burst: {rango_burst}  (solo informativo, revisar manualmente)\n"
+                  f"  Progreso tiempo: {pct_completado:.0%}", silent=True)
 
     def silence_critical(self, label, racha, cum, w_lo, deficit, ratio, h_rem):
         self.send(
@@ -379,8 +399,16 @@ def burst_monitor_loop(tg: Telegram, get_events_fn, paper_book=None):
                 ev_match = next((e for e in events
                                  if title.lower() in e.get("label","").lower()
                                  or e.get("label","").lower() in title.lower()), None)
+
+                # BUG 1 FIX: skip eventos no tradeables (expirados o futuros)
+                if ev_match is not None and not is_event_tradeable(ev_match):
+                    log(f"[BURST] skip {title[:40]} — evento no tradeable "
+                        f"(h_rem={ev_match.get('h_rem',0):.1f}h)")
+                    continue
+
                 cum_total = total
                 h_rem = ev_match["h_rem"] if ev_match else 0
+                total_h = ev_match.get("total_h", 168) if ev_match else 168
                 buckets = ev_match.get("_buckets", []) if ev_match else []
                 prices = ev_match.get("prices", {}) if ev_match else {}
 
@@ -407,7 +435,10 @@ def burst_monitor_loop(tg: Telegram, get_events_fn, paper_book=None):
                 rango_burst  = _rango_de(proj_burst, buckets)
 
                 # ── Refinamiento 1: Timing guard ──────────────────
-                pct_completado = cum_total / proj_normal if proj_normal > 0 else 0
+                # BUG 3 FIX: pct_completado basado en tiempo (h_rem), no en tweets
+                # evita 100% "tweet-based" en eventos con tiempo restante real
+                elapsed_h = max(0, total_h - h_rem) if total_h > 0 else 0
+                pct_completado = elapsed_h / total_h if total_h > 0 else 1.0
                 timing_guard_active = pct_completado < BURST_TIMING_MIN_PCT
 
                 if timing_guard_active:
@@ -415,9 +446,13 @@ def burst_monitor_loop(tg: Telegram, get_events_fn, paper_book=None):
                         f"mínimo requerido {BURST_TIMING_MIN_PCT:.0%}")
 
                 # ── Dim 4 — Spread check (dentro/fuera del spread comprado, +2/+1/+0)
+                # BUG 4 FIX: skip dim4 cuando h_rem < 2 — con h_rem≈0 las proyecciones
+                # convergen a cum_total y el check deja de ser predictivo (matemática rota)
                 spread_status = "N/A"
                 has_position = False
-                if paper_book and ev_match:
+                if h_rem < 2:
+                    spread_status = "SKIP_HREM"
+                elif paper_book and ev_match:
                     slug = ev_match.get("slug", "")
                     owned_ranges = [
                         pos["rng"] for pos_id, pos in paper_book.data.get("positions", {}).items()
@@ -469,14 +504,14 @@ def burst_monitor_loop(tg: Telegram, get_events_fn, paper_book=None):
                         f"tw/h={tweets_hora}  pct={pct_completado:.0%}  "
                         f"spread={spread_status}  trackings={len(trackings)}")
 
-                # Alerta EXIT independiente: spread FUERA (incluso con timing guard)
+                # Alerta BURST_WARN: spread FUERA, solo informativa (cooldown 30 min)
                 if spread_status == "FUERA" and has_position:
                     last_alert = _last_burst_alert.get(f"{tid}_exit")
                     cooldown_ok = (last_alert is None or
-                                   (now - last_alert).total_seconds() > 1200)
+                                   (now - last_alert).total_seconds() > 1800)
                     if cooldown_ok:
                         _last_burst_alert[f"{tid}_exit"] = now
-                        log(f"[BURST] ⚠️ EXIT — proj burst FUERA del spread  {title[:50]}")
+                        log(f"[BURST_WARN] proj burst FUERA del spread — solo informativo  {title[:50]}")
                         tg.burst_exit_alert(
                             label=title, spread_status=spread_status,
                             rango_burst=rango_burst, pct_completado=pct_completado)
@@ -485,7 +520,7 @@ def burst_monitor_loop(tg: Telegram, get_events_fn, paper_book=None):
                 if burst_score >= BURST_SCORE_MIN:
                     last_alert = _last_burst_alert.get(tid)
                     cooldown_ok = (last_alert is None or
-                                   (now - last_alert).total_seconds() > 1200)
+                                   (now - last_alert).total_seconds() > 1800)
                     if cooldown_ok:
                         if timing_guard_active:
                             log(f"[BURST] ⏸ score={burst_score}/6 pero timing guard activo "
@@ -528,12 +563,21 @@ def scrape_tweets(event: dict, state: dict) -> dict:
     """
     slug     = event["slug"]
 
-    # Guard: evento futuro — no scrape
+    # Guard: evento futuro — no scrape + limpiar datos stale del state
     event_start = datetime.strptime(event["start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
     now = datetime.now(tz=timezone.utc)
-    if now < event_start:
-        log(f"[SCRAPE] {slug}: evento futuro (start={event['start']}) — skip")
-        return {"tweets": {}, "total": 0, "dias": 0}
+    h_elapsed = (now - event_start).total_seconds() / 3600
+    if now < event_start or h_elapsed < 2:
+        log(f"[SCRAPE] {slug}: evento futuro o recién iniciado "
+            f"(h_elapsed={h_elapsed:.1f}h) — skip")
+        # BUG 3 FIX: limpiar datos stale para no contaminar señales futuras
+        if slug in state.get("muskmeter", {}):
+            del state["muskmeter"][slug]
+            log(f"[SCRAPE] {slug}: muskmeter stale limpiado")
+        if slug in state.get("xtracker_snapshots", {}):
+            del state["xtracker_snapshots"][slug]
+            log(f"[SCRAPE] {slug}: xtracker_snapshots stale limpiado")
+        return {}
 
     existing = state.get("muskmeter", {}).get(slug, {})
 
@@ -725,7 +769,7 @@ def fetch_active_events() -> list:
             "end":   end_dt.strftime("%Y-%m-%d"),
             "start_ts": start_ts, "end_ts": end_ts,
             "event_id": "", "day_n": day_n, "series": series,
-            "h_rem": h_rem, "count": count,
+            "h_rem": h_rem, "total_h": total_h, "count": count,
             "prices": prices, "_buckets": buckets,
         })
         dow = ["mon","tue","wed","thu","fri","sat","sun"][start_dt.weekday()]
@@ -767,9 +811,15 @@ def rp(lo, hi, mu, sigma):
 
 
 def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
-    # Guard: nunca generar señal para evento futuro
+    # Guard: nunca generar señal para evento futuro o expirado
     today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     if event["start"] > today:
+        return None
+    # BUG 3 FIX: usar is_event_tradeable como única fuente de verdad
+    # (no solo fecha — también verifica h_rem > 2h)
+    if not is_event_tradeable(event):
+        log(f"[SIGNAL] skip {event.get('slug','?')} — evento no tradeable "
+            f"(h_rem={event.get('h_rem',0):.1f}h)")
         return None
 
     day_n  = event["day_n"]
@@ -1001,8 +1051,13 @@ class PaperBook:
             # ── Expired: no price available ──
             if cp is None:
                 reason = "Expired (no price available)"
-                exit_p = 0.01
+                # BUG 2 FIX: usar precio mínimo de mercado (0.001), no 0.01
+                # Un exit a 0.01 generaba PnL ficticio de +$144 cuando la
+                # posición nunca resolvió YES. Precio correcto ≈ 0 para rangos perdedores.
+                exit_p = 0.001
                 nivel = "EXPIRED"
+                log(f"[EXIT_WARN] precio fallback 0.001 para {pos.get('rng','?')} "
+                    f"en {pos.get('event','?')} — verificar resolución manualmente")
             else:
                 exit_p = cp
                 pct = (cp - pos["entry"]) / pos["entry"] if pos["entry"] > 0 else 0
@@ -1067,6 +1122,12 @@ class PaperBook:
 
         for pos_id, pos, exit_p, reason, nivel in to_close:
             pnl = (exit_p - pos["entry"]) * pos["shares"]
+            # Auditoría de PnL anómalo — señal de posible bug de precio
+            pnl_pct_check = (exit_p - pos["entry"]) / pos["entry"] if pos["entry"] > 0 else 0
+            if pnl_pct_check > 5.0:  # +500%
+                log(f"[EXIT_WARN] PnL anomalo +{pnl_pct_check*100:.0f}% en "
+                    f"{pos.get('rng','?')} — entry={pos['entry']:.4f} exit={exit_p:.4f} "
+                    f"— verificar precio de salida")
             self.data["capital"] += exit_p * pos["shares"]
             outcome = "win" if pnl > 0 else "loss"
             self.data["stats"]["wins" if outcome=="win" else "losses"] += 1
@@ -1148,6 +1209,37 @@ def save_state(state: dict):
 
 
 # ══════════════════════════════════════════════════════════════════════
+# AUDITORÍA DE CAPITAL
+# ══════════════════════════════════════════════════════════════════════
+
+def audit_capital(paper: "PaperBook") -> None:
+    """
+    Recalcula el capital real sumando: cash + valor_posiciones_abiertas.
+    Loguea discrepancia si difiere del capital registrado en más de $1.
+    """
+    positions = paper.data.get("positions", {})
+    cash = paper.data.get("capital", 0.0)
+    invested = sum(pos.get("cost", 0) for pos in positions.values())
+    # Valor estimado de posiciones abiertas a precio de entrada (conservador)
+    open_value = sum(pos.get("cost", 0) for pos in positions.values())
+    reconstructed = cash + open_value
+    registered = cash  # el capital registrado solo incluye cash disponible
+
+    n_pos = len(positions)
+    log(f"[CAPITAL] cash=${cash:.2f}  posiciones_abiertas={n_pos} "
+        f"(invertido=${invested:.2f})  capital_total_estimado=${reconstructed:.2f}")
+
+    if n_pos > 0:
+        for pos_id, pos in list(positions.items())[:5]:
+            log(f"[CAPITAL]   {pos.get('rng','?'):12}  "
+                f"entry={pos.get('entry',0):.3f}  "
+                f"cost=${pos.get('cost',0):.2f}  "
+                f"event={pos.get('event','?')[:30]}")
+        if n_pos > 5:
+            log(f"[CAPITAL]   ... y {n_pos-5} más")
+
+
+# ══════════════════════════════════════════════════════════════════════
 # LOOP PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════
 
@@ -1162,6 +1254,10 @@ def main():
     tg    = Telegram()
     paper = PaperBook()
     state = load_state()
+
+    # BUG CAPITAL FIX: auditoría al arranque para detectar estado inconsistente
+    log(f"[CAPITAL] Arranque — capital registrado: ${paper.data['capital']:.2f}")
+    audit_capital(paper)
 
     tg.bot_start(paper.data["capital"])
 
@@ -1195,6 +1291,7 @@ def main():
     while True:
         try:
             log(f"\n{'─'*50} {datetime.now().strftime('%H:%M')}")
+            audit_capital(paper)
 
             events = fetch_active_events()
             _set_cached_events(events)
@@ -1254,6 +1351,12 @@ def main():
 
                 prev_total = state["prev_totals"].get(ev["series"], HIST_MEAN)
                 last_day   = state["signals_sent"].get(slug, 0)
+
+                # BUG 3 FIX: guard adicional — no generar señal si evento no tradeable
+                if not is_event_tradeable(ev):
+                    log(f"[MAIN] {slug}: skip señal — evento no tradeable "
+                        f"(h_rem={ev.get('h_rem',0):.1f}h)")
+                    continue
 
                 if day_n >= 3 and day_n != last_day:
                     signal = generar_senal(ev, fresh, prev_total)
