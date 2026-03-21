@@ -127,7 +127,8 @@ class Telegram:
             log(f"[TG] Error: {e}")
             return False
 
-    def signal_entry(self, label, day_n, ranges, prices, proj, ev, confidence):
+    def signal_entry(self, label, day_n, ranges, prices, proj, ev, confidence,
+                     pace_actual=None, n_days=None):
         cost = sum(prices.get(r, 0.05) for r in ranges)
         roi  = (1 / cost - 1) * 100 if cost > 0 else 0
         lines = [f"📊 <b>SEÑAL D{day_n} — {label}</b>", "",
@@ -139,9 +140,10 @@ class Telegram:
                   f"📈 ROI si gana:    <b>+{roi:.0f}%</b>",
                   f"🔮 Proyección:     <b>{proj} tweets</b>",
                   f"⚡ EV esperado:    <b>{ev*100:+.0f}%</b>",
-                  f"🎲 Confianza:      <b>{confidence}</b>",
-                  "",
-                  f"⏰ {datetime.now().strftime('%d/%m %H:%M')} UTC"]
+                  f"🎲 Confianza:      <b>{confidence}</b>"]
+        if pace_actual is not None and n_days is not None:
+            lines.append(f"⚠️ Pace actual:    <b>{pace_actual:.0f}/día</b> ({n_days} días observados)")
+        lines += ["", f"⏰ {datetime.now().strftime('%d/%m %H:%M')} UTC"]
         self.send("\n".join(lines))
 
     def paper_buy(self, label, rng, price, amount, capital_left):
@@ -799,7 +801,9 @@ def proyectar(daily: dict, start: str) -> tuple:
     start_dt  = datetime.strptime(start, "%Y-%m-%d")
     days_left = max(0, 8 - (last_date - start_dt).days - 1)
     proj_pace  = cum + pace_base * days_left
-    proj_blend = 0.50*proj_pace + 0.30*HIST_MEAN + 0.20*HIST_MEAN
+    # Use event pace as primary; historical anchor shrinks with more data
+    w_hist     = max(0.0, 0.4 - n * 0.08)   # n=3→0.16, n=5→0.0
+    proj_blend = (1.0 - w_hist) * proj_pace + w_hist * HIST_MEAN
     sigma      = max(40, HIST_SIGMA - n*4)
     return round(proj_blend), round(sigma), n, round(pace_mean, 1)
 
@@ -832,7 +836,14 @@ def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
     pace3 = sum(vals[:3])/3 if len(vals) >= 3 else pace
     confidence = "ALTA" if (pace3 > 50 or pace3 < 25 or max(vals[:3]) > 60) else "MEDIA"
 
-    cum_total = sum(daily.values())
+    cum_total      = sum(daily.values())
+    n_days_actual  = max(1, len(daily))
+    pace_actual    = cum_total / n_days_actual
+    hist_daily     = HIST_MEAN / 8            # ~42.9 tweets/day baseline
+    if pace_actual > 2 * hist_daily:
+        log(f"[GATE_BLOCKED] {event['slug']} pace={pace_actual:.0f}/d "
+            f"supera 2x histórico ({hist_daily:.0f}/d) — señal no fiable")
+        return None
     rangos = sorted([r for r in prices if _parse_range(r) is not None
                      and _parse_range(r)[1] > cum_total],
                     key=lambda x: _parse_range(x)[0])
@@ -867,6 +878,7 @@ def generar_senal(event: dict, daily: dict, prev_total: int) -> dict | None:
             "day_n": day_n, "series": event["series"],
             "ts": datetime.now(tz=timezone.utc).isoformat(),
             "proj": proj, "sigma": sigma, "pace": pace,
+            "pace_actual": round(pace_actual, 1), "n_days_actual": n_days_actual,
             "confidence": confidence, "spread": top,
             "no_signals": no_signals, "prices": prices}
 
@@ -1240,6 +1252,92 @@ def audit_capital(paper: "PaperBook") -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# PORTFOLIO HEARTBEAT
+# ══════════════════════════════════════════════════════════════════════
+
+def send_portfolio_heartbeat(tg: "Telegram", paper: "PaperBook", events: list):
+    now = datetime.now(tz=timezone.utc)
+    ts_str = now.strftime("%d/%m %H:%M")
+
+    cash = paper.data["capital"]
+    positions = paper.data["positions"]
+    n_pos = len(positions)
+
+    price_by_slug = {ev["slug"]: ev.get("prices", {}) for ev in events}
+
+    lines = [f"📊 Portfolio — {ts_str} UTC", "",
+             f"💰 Capital cash:     ${cash:.2f}",
+             f"📦 Posiciones abiertas: {n_pos}", ""]
+
+    total_value = 0.0
+    total_cost   = 0.0
+
+    for pos in positions.values():
+        slug   = pos["slug"]
+        rng    = pos["rng"]
+        entry  = pos["entry"]
+        cost   = pos.get("cost", 0.0)
+        shares = pos.get("shares", 0.0)
+
+        prices = price_by_slug.get(slug, {})
+        if rng in prices and prices[rng] > 0:
+            cp        = prices[rng]
+            price_tag = ""
+        else:
+            cp        = entry
+            price_tag = " (est.)"
+
+        pnl_pct   = (cp - entry) / entry if entry > 0 else 0
+        cur_value = cp * shares
+        total_value += cur_value
+        total_cost  += cost
+
+        ev_obj = next((e for e in events if e["slug"] == slug), None)
+        if ev_obj:
+            try:
+                sd = datetime.strptime(ev_obj["start"], "%Y-%m-%d")
+                ed = datetime.strptime(ev_obj["end"],   "%Y-%m-%d")
+                ev_label = f"{sd.strftime('%b')}{sd.day}-{ed.day}"
+            except Exception:
+                ev_label = slug[:10]
+        else:
+            ev_label = slug[:10]
+
+        lines.append(
+            f"  {ev_label} | {rng} @ {entry*100:.1f}¢ → actual {cp*100:.2f}¢{price_tag}"
+            f" | {pnl_pct:+.0%} | ${cost:.2f} → ~${cur_value:.0f}")
+
+    pnl_open = total_value - total_cost
+    pnl_open_pct = pnl_open / total_cost if total_cost > 0 else 0.0
+
+    lines += ["",
+              f"📈 Valor posiciones:  ~${total_value:.0f}",
+              f"💼 Portfolio total:   ~${cash + total_value:.0f}",
+              f"📉 PnL abierto:       {pnl_open:+.0f}$ ({pnl_open_pct:+.0%})"]
+
+    if events:
+        lines.append("")
+        for ev in events:
+            count = ev.get("count", 0)
+            h_rem = ev.get("h_rem", 0)
+            d_rem = max(0, h_rem / 24)
+            ev_prices = ev.get("prices", {})
+            try:
+                sd = datetime.strptime(ev["start"], "%Y-%m-%d")
+                ed = datetime.strptime(ev["end"],   "%Y-%m-%d")
+                ev_label = f"{sd.strftime('%b')}{sd.day}-{ed.day}"
+            except Exception:
+                ev_label = ev.get("slug", "?")[:10]
+            winner_rng = max(ev_prices, key=ev_prices.get) if ev_prices else "?"
+            lines.append(f"🔮 Tweets actuales:   {count} ({ev_label})")
+            lines.append(f"📅 {ev_label}: {count} tweets, {d_rem:.0f}d restantes,"
+                         f" winner prob. {winner_rng}")
+
+    tg.send("\n".join(lines))
+    log("[HEARTBEAT] Portfolio heartbeat enviado")
+
+
+# ══════════════════════════════════════════════════════════════════════
 # LOOP PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════
 
@@ -1281,12 +1379,14 @@ def main():
     burst_thread.start()
     log("[BURST] Hilo iniciado")
 
-    last_weekly = datetime(2000, 1, 1)
+    last_weekly      = datetime(2000, 1, 1)
     if state.get("last_weekly"):
         try:
             last_weekly = datetime.fromisoformat(state["last_weekly"])
         except:
             pass
+
+    last_heartbeat_ts = None   # None → enviar en el primer ciclo
 
     while True:
         try:
@@ -1300,7 +1400,19 @@ def main():
                 time.sleep(300)
                 continue
 
+            n_before    = len(paper.data["positions"])
             n_monitored = paper.check_exits(events, tg, state)
+            n_after     = len(paper.data["positions"])
+            if n_after < n_before:
+                send_portfolio_heartbeat(tg, paper, events)
+                last_heartbeat_ts = datetime.now(tz=timezone.utc)
+
+            # ── Portfolio heartbeat cada 6h ──
+            now_utc = datetime.now(tz=timezone.utc)
+            if (last_heartbeat_ts is None or
+                    (now_utc - last_heartbeat_ts).total_seconds() >= 6 * 3600):
+                send_portfolio_heartbeat(tg, paper, events)
+                last_heartbeat_ts = now_utc
 
             # ── Silence Detector (WARNING alerts only — CRITICAL handled in check_exits) ──
             _silence_cycle = getattr(main, '_silence_cycle', 0)
@@ -1371,7 +1483,9 @@ def main():
                         tg.signal_entry(label=ev["label"], day_n=day_n,
                                         ranges=top["ranges"], prices=ev["prices"],
                                         proj=signal["proj"], ev=top["ev"],
-                                        confidence=signal["confidence"])
+                                        confidence=signal["confidence"],
+                                        pace_actual=signal.get("pace_actual"),
+                                        n_days=signal.get("n_days_actual"))
                         bought = paper.buy(signal, tg)
                         if bought:
                             log(f"[PAPER] Comprados: {bought}")
