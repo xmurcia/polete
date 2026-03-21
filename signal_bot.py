@@ -717,6 +717,7 @@ def fetch_active_events() -> list:
         from src.polymarket_sensor import PolymarketSensor
         from src.clob_scanner import ClobMarketScanner
         from src.utils import titles_match_paranoid
+        import dateutil.parser as _dp
     except ImportError as e:
         log(f"[EVENTS] ImportError: {e}")
         return []
@@ -728,7 +729,32 @@ def fetch_active_events() -> list:
     if not m_polys:
         return []
     clob_data = scanner.get_market_prices()
-    result    = []
+
+    # FIX 1: obtener fechas reales desde xtracker API (startDate/endDate del slug)
+    tracking_dates = {}  # title -> (start_dt, end_dt) con tzinfo=UTC
+    try:
+        import requests as _req
+        r = _req.get(
+            f"https://xtracker.polymarket.com/api/users/elonmusk",
+            timeout=5, headers={"User-Agent": "Mozilla/5.0"}
+        )
+        for t in r.json().get("data", {}).get("trackings", []):
+            t_title = t.get("title", "")
+            t_start = t.get("startDate", "")
+            t_end   = t.get("endDate", "")
+            if t_title and t_start and t_end:
+                try:
+                    s = _dp.isoparse(t_start).replace(
+                        hour=17, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+                    e = _dp.isoparse(t_end).replace(
+                        hour=17, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+                    tracking_dates[t_title] = (s, e)
+                except Exception:
+                    pass
+    except Exception as ex:
+        log(f"[EVENTS] No se pudieron obtener fechas de API xtracker: {ex}")
+
+    result = []
 
     for mp in m_polys:
         title   = mp.get("title", "")
@@ -736,18 +762,54 @@ def fetch_active_events() -> list:
         h_rem   = mp.get("hours", 0)
         total_h = mp.get("total_hours", 168)
 
-        elapsed_h = max(0, total_h - h_rem)
-        day_n     = max(1, int(elapsed_h / 24) + 1)
-        start_dt  = now - timedelta(hours=elapsed_h)
-        end_dt    = now + timedelta(hours=h_rem)
-        series    = "tue" if start_dt.weekday() == 1 else "fri"
-        start_ts  = int(start_dt.replace(hour=17, minute=0, second=0,
-                                          microsecond=0).timestamp())
-        end_ts    = int(end_dt.replace(hour=17, minute=0, second=0,
-                                        microsecond=0).timestamp())
         slug = re.sub(r'-+', '-',
                title.lower().replace(" ", "-").replace("#", "")
                     .replace(",", "").replace("?", "")).strip('-')
+
+        # FIX 1: usar fechas reales de la API; nunca derivar start_date de datetime.now()
+        if title in tracking_dates:
+            start_dt, end_dt = tracking_dates[title]
+        else:
+            # Fallback solo si la API no devolvió fechas — loguear advertencia
+            elapsed_h = max(0, total_h - h_rem)
+            start_dt  = (now - timedelta(hours=elapsed_h)).replace(
+                hour=17, minute=0, second=0, microsecond=0)
+            end_dt    = (now + timedelta(hours=h_rem)).replace(
+                hour=17, minute=0, second=0, microsecond=0)
+            log(f"[EVENTS] WARN: fechas inferidas para '{title}' (no en API xtracker)")
+
+        # Validación de fechas
+        duration_days = (end_dt - start_dt).total_seconds() / 86400
+        if start_dt > end_dt:
+            log(f"[EVENT_WARN] {title}: start_date > end_date — DESCARTADO")
+            continue
+        if duration_days > 14:
+            log(f"[EVENT_WARN] {title}: duración {duration_days:.1f}d > 14d — DESCARTADO")
+            continue
+
+        # FIX 2: filtrar por slug (elon-musk + tweets) y duración 3-8 días
+        has_elon   = "elon-musk" in slug
+        has_tweets = "tweets" in slug or "tweet" in slug
+        if not (has_elon and has_tweets):
+            log(f"[EVENT_SKIP] '{title}': slug no contiene elon-musk+tweets")
+            continue
+        if not (3 <= duration_days <= 8):
+            log(f"[EVENT_SKIP] '{title}': duración {duration_days:.1f}d fuera de rango 3-8d")
+            continue
+        if h_rem <= 0:
+            log(f"[EVENT_SKIP] '{title}': h_rem={h_rem:.1f}h — expirado")
+            continue
+        h_elapsed_actual = (now - start_dt).total_seconds() / 3600
+        if h_elapsed_actual < -(total_h):
+            log(f"[EVENT_SKIP] '{title}': evento muy lejano en el futuro")
+            continue
+
+        start_ts = int(start_dt.timestamp())
+        end_ts   = int(end_dt.timestamp())
+        series   = "tue" if start_dt.weekday() == 1 else "fri"
+
+        elapsed_h_actual = max(0, (now - start_dt).total_seconds() / 3600)
+        day_n = max(1, int(elapsed_h_actual / 24) + 1)
 
         prices, buckets = {}, []
         m_clob = next((c for c in clob_data
@@ -760,10 +822,10 @@ def fetch_active_events() -> list:
                     prices[rng] = ask
 
         # Guard: evento futuro — count=0, no scrape
-        is_future = now < start_dt.replace(tzinfo=timezone.utc)
+        is_future = now < start_dt
         if is_future:
-            count   = 0
-            day_n   = 0
+            count = 0
+            day_n = 0
 
         result.append({
             "slug": slug, "label": title,
@@ -1358,6 +1420,15 @@ def main():
     audit_capital(paper)
 
     tg.bot_start(paper.data["capital"])
+
+    # FIX 3: auditoría de capital al arranque — solo log, NO Telegram
+    _audit_cash = paper.data.get("capital", 0.0)
+    _audit_pos  = paper.data.get("positions", {})
+    _audit_n    = len(_audit_pos)
+    _audit_inv  = sum(p.get("cost", 0) for p in _audit_pos.values())
+    _audit_tot  = _audit_cash + _audit_inv
+    log(f"[CAPITAL_AUDIT] cash=${_audit_cash:.2f} | posiciones={_audit_n} | "
+        f"total=${_audit_tot:.2f} | ¿esperado? — verificar manualmente")
 
     # Arrancar burst monitor en hilo paralelo
     _cached_events = []
