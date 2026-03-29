@@ -1,0 +1,6 @@
+# Signal Bot — archivos de estado y señales pendientes
+# Generados automáticamente por signal_bot.py y orchestrator.py
+# NO commitear los .json (contienen estado y portfolio en tiempo real)
+paper_portfolio.json
+signal_bot_state.json
+executed_signals.json
